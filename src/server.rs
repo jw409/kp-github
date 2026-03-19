@@ -2819,12 +2819,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_files_delete() {
-        let server = mock_server(vec![json!({"commit": {"sha": "abc123"}})]);
+        let server = mock_server(vec![json!({"commit": {"sha": "abc123", "message": "deleted", "author": {"name": "jw", "date": "2026-03-18T12:00:00Z"}}})]);
         let result = server.github_files_delete(Parameters(FileDeleteParams {
             owner: "o".into(), repo: "r".into(), path: "old.txt".into(),
             message: "remove".into(), branch: "main".into(), sha: "def456".into(),
         })).await.unwrap();
-        assert!(ok_text(&result).contains("abc123"));
+        assert!(ok_text(&result).contains("deleted"));
     }
 
     #[tokio::test]

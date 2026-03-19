@@ -1,5 +1,10 @@
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    base64::engine::general_purpose::STANDARD.decode(s)
+}
 
 /// Configuration for compression pipeline
 pub struct CompressConfig {
@@ -118,6 +123,11 @@ fn stage1_strip(map: &mut Map<String, Value>, config: &CompressConfig) {
         "draft",
         "timeline_url",
         "state_reason",
+        "_links",
+        "verification",
+        "tree",
+        "git_url",
+        "download_url",
     ];
 
     for key in waste_keys {
@@ -173,6 +183,39 @@ fn stage2_flatten(map: &mut Map<String, Value>) {
     // head/base: { ref: "branch", sha: "abc..." } -> head_ref, head_sha
     flatten_ref_object(map, "head");
     flatten_ref_object(map, "base");
+
+    // commit: { message: "...", author: { name, date }, ... } -> message, commit_author, commit_date
+    // Uses prefixed keys to avoid collision with top-level `author` (GitHub user object)
+    if let Some(Value::Object(commit)) = map.remove("commit") {
+        if let Some(msg) = commit.get("message") {
+            map.insert("message".to_string(), msg.clone());
+        }
+        if let Some(Value::Object(author)) = commit.get("author") {
+            if let Some(name) = author.get("name") {
+                // Only set if no top-level author already (issue/PR have user objects)
+                if !map.contains_key("author") {
+                    map.insert("author".to_string(), name.clone());
+                }
+            }
+            if let Some(date) = author.get("date") {
+                map.insert("commit_date".to_string(), date.clone());
+            }
+        }
+    }
+
+    // file content: decode base64 content for files API responses
+    if let Some(Value::String(encoding)) = map.remove("encoding") {
+        if encoding == "base64" {
+            if let Some(Value::String(content)) = map.get("content") {
+                let cleaned: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+                if let Ok(decoded) = base64_decode(&cleaned) {
+                    if let Ok(text) = String::from_utf8(decoded) {
+                        map.insert("content".to_string(), Value::String(text));
+                    }
+                }
+            }
+        }
+    }
 
     // repo nested in head/base already handled by strip
     if let Some(Value::Object(repo)) = map.remove("repository") {
