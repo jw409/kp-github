@@ -72,26 +72,32 @@ pub async fn run_logs(
     client.api_raw(&endpoint, "application/vnd.github.v3+json").await
 }
 
+#[cfg(test)]
 fn list_runs_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/actions/runs")
 }
 
+#[cfg(test)]
 fn get_run_endpoint(owner: &str, repo: &str, run_id: u64) -> String {
     format!("/repos/{owner}/{repo}/actions/runs/{run_id}")
 }
 
+#[cfg(test)]
 fn rerun_endpoint(owner: &str, repo: &str, run_id: u64) -> String {
     format!("/repos/{owner}/{repo}/actions/runs/{run_id}/rerun")
 }
 
+#[cfg(test)]
 fn list_workflows_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/actions/workflows")
 }
 
+#[cfg(test)]
 fn run_logs_endpoint(owner: &str, repo: &str, run_id: u64) -> String {
     format!("/repos/{owner}/{repo}/actions/runs/{run_id}/logs")
 }
 
+#[cfg(test)]
 fn extract_workflow_runs(result: &Value) -> Value {
     if let Value::Object(ref map) = result {
         if let Some(runs) = map.get("workflow_runs") {
@@ -101,6 +107,7 @@ fn extract_workflow_runs(result: &Value) -> Value {
     result.clone()
 }
 
+#[cfg(test)]
 fn extract_workflows(result: &Value) -> Value {
     if let Value::Object(ref map) = result {
         if let Some(workflows) = map.get("workflows") {

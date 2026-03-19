@@ -1,4 +1,4 @@
-use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
+use reqwest::header::{ACCEPT, AUTHORIZATION, LINK, USER_AGENT};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -135,19 +135,251 @@ impl GithubClient {
         }
     }
 
-    /// List endpoint with query params (GET only)
+    /// List endpoint with query params — paginates automatically for limit > 100.
     pub async fn api_list(
         &self,
         endpoint: &str,
         query_params: &[(&str, &str)],
         limit: Option<u32>,
     ) -> Result<Value, ClientError> {
-        let per_page = limit.unwrap_or(30).min(100);
+        let effective_limit = limit.unwrap_or(30);
+        let per_page = effective_limit.min(100);
+
         let mut url = format!("{endpoint}?per_page={per_page}");
         for (k, v) in query_params {
             url.push_str(&format!("&{k}={}", crate::util::urlencode(v)));
         }
-        self.api(&url, &[]).await
+
+        match &self.backend {
+            Backend::Http { client, token } => {
+                let mut all_items: Vec<Value> = Vec::new();
+                let mut next_url = Some(format!("{}{url}", self.base_url));
+
+                while let Some(current_url) = next_url.take() {
+                    let resp = client
+                        .get(&current_url)
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
+                        .header(ACCEPT, "application/vnd.github+json")
+                        .header(USER_AGENT, "kp-github-mcp/0.1")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+
+                    if !resp.status().is_success() {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(ClientError::Api(format!("{status}: {body}")));
+                    }
+
+                    // Check rate limit
+                    let remaining = resp
+                        .headers()
+                        .get("x-ratelimit-remaining")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u32>().ok());
+                    if let Some(rem) = remaining {
+                        if rem < 100 {
+                            tracing::warn!("GitHub rate limit: {rem} requests remaining");
+                        }
+                    }
+
+                    // Parse Link header for next page
+                    let link_next = resp
+                        .headers()
+                        .get(LINK)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(parse_link_next)
+                        .map(|s| s.to_string());
+
+                    let text = resp.text().await?;
+                    let page: Value = serde_json::from_str(&text)?;
+
+                    if let Some(arr) = page.as_array() {
+                        all_items.extend(arr.iter().cloned());
+                    } else {
+                        // Non-array response — return as-is (shouldn't happen for list endpoints)
+                        return Ok(page);
+                    }
+
+                    // Stop if we have enough or no more pages
+                    if all_items.len() >= effective_limit as usize {
+                        all_items.truncate(effective_limit as usize);
+                        break;
+                    }
+
+                    next_url = link_next;
+                }
+
+                Ok(Value::Array(all_items))
+            }
+            Backend::GhCli => {
+                // gh CLI handles pagination natively with --paginate
+                if effective_limit > 100 {
+                    let args = vec![
+                        "--paginate".to_string(),
+                        "--slurp".to_string(),
+                    ];
+                    // Build the URL with query params
+                    let full_url = url.clone();
+                    let mut cmd = tokio::process::Command::new("gh");
+                    cmd.args(["api", &full_url]);
+                    cmd.args(&args);
+
+                    let output = cmd
+                        .output()
+                        .await
+                        .map_err(|e| ClientError::Cli(e.to_string()))?;
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        return Err(ClientError::Api(stderr.to_string()));
+                    }
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if stdout.trim().is_empty() {
+                        return Ok(Value::Array(Vec::new()));
+                    }
+                    // --slurp wraps pages in an array of arrays; flatten
+                    let pages: Value = serde_json::from_str(&stdout)?;
+                    if let Some(outer) = pages.as_array() {
+                        let mut all: Vec<Value> = Vec::new();
+                        for page in outer {
+                            if let Some(arr) = page.as_array() {
+                                all.extend(arr.iter().cloned());
+                            }
+                        }
+                        all.truncate(effective_limit as usize);
+                        Ok(Value::Array(all))
+                    } else {
+                        Ok(pages)
+                    }
+                } else {
+                    self.api(&url, &[]).await
+                }
+            }
+            #[cfg(test)]
+            Backend::Mock { responses } => {
+                // For mock: pop all queued responses and merge arrays
+                let mut q = responses.lock().unwrap();
+                let mut all_items: Vec<Value> = Vec::new();
+                // Pop first response
+                match q.pop_front() {
+                    Some(Ok(page)) => {
+                        if let Some(arr) = page.as_array() {
+                            all_items.extend(arr.iter().cloned());
+                        } else {
+                            return Ok(page);
+                        }
+                    }
+                    Some(Err(e)) => return Err(e),
+                    None => return Ok(Value::Array(Vec::new())),
+                }
+
+                // If limit > 100, keep popping pages (simulates pagination)
+                if effective_limit > 100 {
+                    while all_items.len() < effective_limit as usize {
+                        match q.pop_front() {
+                            Some(Ok(page)) => {
+                                if let Some(arr) = page.as_array() {
+                                    if arr.is_empty() {
+                                        break;
+                                    }
+                                    all_items.extend(arr.iter().cloned());
+                                } else {
+                                    break;
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+                    all_items.truncate(effective_limit as usize);
+                }
+
+                Ok(Value::Array(all_items))
+            }
+        }
+    }
+
+    /// POST/PATCH/PUT a JSON body directly (not via -f key=value args).
+    /// Used for Git Data API calls that need nested objects/arrays.
+    pub async fn api_json(
+        &self,
+        endpoint: &str,
+        method: &str,
+        body: &Value,
+    ) -> Result<Value, ClientError> {
+        match &self.backend {
+            Backend::Http { client, token } => {
+                let url = format!("{}{endpoint}", self.base_url);
+                let req = match method {
+                    "POST" => client.post(&url),
+                    "PATCH" => client.patch(&url),
+                    "PUT" => client.put(&url),
+                    _ => client.get(&url),
+                };
+
+                let resp = req
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .header(ACCEPT, "application/vnd.github+json")
+                    .header(USER_AGENT, "kp-github-mcp/0.1")
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .json(body)
+                    .send()
+                    .await?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(ClientError::Api(format!("{status}: {body}")));
+                }
+
+                let text = resp.text().await?;
+                if text.trim().is_empty() {
+                    return Ok(Value::Null);
+                }
+                Ok(serde_json::from_str(&text)?)
+            }
+            Backend::GhCli => {
+                // Serialize body to JSON string and pass via --input
+                let body_str = serde_json::to_string(body)
+                    .map_err(|e| ClientError::Cli(format!("JSON serialize: {e}")))?;
+                let mut cmd = tokio::process::Command::new("gh");
+                cmd.args(["api", endpoint, "-X", method, "--input", "-"]);
+                cmd.stdin(std::process::Stdio::piped());
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
+
+                let mut child = cmd.spawn().map_err(|e| ClientError::Cli(e.to_string()))?;
+
+                if let Some(mut stdin) = child.stdin.take() {
+                    use tokio::io::AsyncWriteExt;
+                    stdin
+                        .write_all(body_str.as_bytes())
+                        .await
+                        .map_err(|e| ClientError::Cli(e.to_string()))?;
+                    drop(stdin);
+                }
+
+                let output = child
+                    .wait_with_output()
+                    .await
+                    .map_err(|e| ClientError::Cli(e.to_string()))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(ClientError::Api(stderr.to_string()));
+                }
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.trim().is_empty() {
+                    return Ok(Value::Null);
+                }
+                Ok(serde_json::from_str(&stdout)?)
+            }
+            #[cfg(test)]
+            Backend::Mock { responses } => {
+                let mut q = responses.lock().unwrap();
+                q.pop_front().unwrap_or(Ok(Value::Null))
+            }
+        }
     }
 
     /// Call GitHub API with a custom Accept header, returning raw text.
@@ -229,6 +461,21 @@ impl GithubClient {
         }
         Ok(serde_json::from_str(&stdout)?)
     }
+}
+
+/// Parse the `Link` header to find the `rel="next"` URL.
+/// Format: `<https://api.github.com/...?page=2>; rel="next", <...>; rel="last"`
+fn parse_link_next(header: &str) -> Option<&str> {
+    for part in header.split(',') {
+        let part = part.trim();
+        if part.contains("rel=\"next\"") {
+            // Extract URL between < and >
+            let start = part.find('<')? + 1;
+            let end = part.find('>')?;
+            return Some(&part[start..end]);
+        }
+    }
+    None
 }
 
 /// Extract HTTP method from gh-style args: ["-X", "POST", ...] -> "POST"
@@ -766,5 +1013,184 @@ mod tests {
         let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
         let result = client.api_raw("/repos/o/r/pulls/1", "application/vnd.github.v3.diff").await.unwrap();
         assert!(result.contains("diff"));
+    }
+
+    // ---- Pagination tests ----
+
+    #[test]
+    fn test_parse_link_next() {
+        let header = r#"<https://api.github.com/repos/o/r/issues?page=2&per_page=100>; rel="next", <https://api.github.com/repos/o/r/issues?page=5&per_page=100>; rel="last""#;
+        let next = parse_link_next(header);
+        assert_eq!(
+            next,
+            Some("https://api.github.com/repos/o/r/issues?page=2&per_page=100")
+        );
+    }
+
+    #[test]
+    fn test_parse_link_next_no_next() {
+        let header = r#"<https://api.github.com/repos/o/r/issues?page=1>; rel="prev""#;
+        assert_eq!(parse_link_next(header), None);
+    }
+
+    #[test]
+    fn test_parse_link_next_empty() {
+        assert_eq!(parse_link_next(""), None);
+    }
+
+    #[tokio::test]
+    async fn test_mock_pagination_over_100() {
+        // Simulate limit=150 with two pages of 100 and 50
+        let page1: Vec<Value> = (1..=100).map(|i| json!({"id": i})).collect();
+        let page2: Vec<Value> = (101..=150).map(|i| json!({"id": i})).collect();
+
+        let client = GithubClient::mock(vec![
+            Value::Array(page1),
+            Value::Array(page2),
+        ]);
+        let result = client
+            .api_list("/repos/o/r/issues", &[], Some(150))
+            .await
+            .unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 150);
+        assert_eq!(arr[0]["id"], 1);
+        assert_eq!(arr[99]["id"], 100);
+        assert_eq!(arr[100]["id"], 101);
+        assert_eq!(arr[149]["id"], 150);
+    }
+
+    #[tokio::test]
+    async fn test_mock_pagination_truncates_to_limit() {
+        // 2 full pages of 100, but limit is 150
+        let page1: Vec<Value> = (1..=100).map(|i| json!({"id": i})).collect();
+        let page2: Vec<Value> = (101..=200).map(|i| json!({"id": i})).collect();
+
+        let client = GithubClient::mock(vec![
+            Value::Array(page1),
+            Value::Array(page2),
+        ]);
+        let result = client
+            .api_list("/repos/o/r/issues", &[], Some(150))
+            .await
+            .unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 150);
+    }
+
+    #[tokio::test]
+    async fn test_mock_pagination_small_limit() {
+        // limit <= 100 should NOT consume extra pages
+        let client = GithubClient::mock(vec![
+            json!([{"id": 1}, {"id": 2}]),
+            json!([{"id": 3}]),  // should NOT be consumed
+        ]);
+        let result = client
+            .api_list("/repos/o/r/issues", &[], Some(10))
+            .await
+            .unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_http_pagination_with_link_header() {
+        use wiremock::matchers::query_param;
+
+        let server = MockServer::start().await;
+
+        let page1: Vec<Value> = (1..=100).map(|i| json!({"id": i})).collect();
+        let page2: Vec<Value> = (101..=150).map(|i| json!({"id": i})).collect();
+
+        // Page 1: return Link header pointing to page 2
+        let page2_url = format!(
+            "{}/repos/o/r/issues?per_page=100&state=open&page=2",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues"))
+            .and(query_param("page", "2"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(&page2),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues"))
+            .and(query_param("per_page", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(&page1)
+                    .insert_header(
+                        "link",
+                        format!("<{page2_url}>; rel=\"next\""),
+                    ),
+            )
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = client
+            .api_list("/repos/o/r/issues", &[("state", "open")], Some(150))
+            .await
+            .unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 150);
+        assert_eq!(arr[0]["id"], 1);
+        assert_eq!(arr[149]["id"], 150);
+    }
+
+    // ---- api_json tests ----
+
+    #[tokio::test]
+    async fn test_mock_api_json() {
+        let client = GithubClient::mock(vec![json!({"sha": "abc123"})]);
+        let body = json!({"content": "SGVsbG8=", "encoding": "base64"});
+        let result = client
+            .api_json("/repos/o/r/git/blobs", "POST", &body)
+            .await
+            .unwrap();
+        assert_eq!(result["sha"], "abc123");
+    }
+
+    #[tokio::test]
+    async fn test_http_api_json_post() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/git/blobs"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(json!({"sha": "blob123"})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let body = json!({"content": "SGVsbG8=", "encoding": "base64"});
+        let result = client
+            .api_json("/repos/o/r/git/blobs", "POST", &body)
+            .await
+            .unwrap();
+        assert_eq!(result["sha"], "blob123");
+    }
+
+    #[tokio::test]
+    async fn test_http_api_json_patch() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/o/r/git/refs/heads/main"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ref": "refs/heads/main"})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let body = json!({"sha": "newcommit123"});
+        let result = client
+            .api_json("/repos/o/r/git/refs/heads/main", "PATCH", &body)
+            .await
+            .unwrap();
+        assert_eq!(result["ref"], "refs/heads/main");
     }
 }

@@ -31,10 +31,12 @@ pub async fn search(
     }
 }
 
+#[cfg(test)]
 fn search_url(query: &str, per_page: u32) -> String {
     format!("/search/code?q={}&per_page={per_page}", crate::util::urlencode(query))
 }
 
+#[cfg(test)]
 fn extract_search_items(result: &Value, limit: Option<u32>) -> Value {
     match result {
         Value::Object(ref map) => {

@@ -17,6 +17,7 @@ pub async fn members(
     client.api(&endpoint, &[]).await
 }
 
+#[cfg(test)]
 fn members_endpoint(org: &str, team_slug: &str) -> String {
     format!("/orgs/{org}/teams/{team_slug}/members")
 }

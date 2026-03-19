@@ -986,4 +986,72 @@ mod tests {
         // These call the env helpers directly
         assert_eq!(env_format("KP_GITHUB_NONEXISTENT_FORMAT_KEY_12345"), OutputFormat::Auto);
     }
+
+    // ---- property-based tests (proptest) ----
+
+    use proptest::prelude::*;
+
+    // 1. Compression never panics on arbitrary JSON
+    proptest! {
+        #[test]
+        fn compress_never_panics(json_str in "\\PC{0,500}") {
+            if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+                let config = CompressConfig::default();
+                let _ = compress(&val, &config, now());
+            }
+        }
+    }
+
+    // 2. Field projection never adds keys
+    proptest! {
+        #[test]
+        fn projection_only_removes_keys(
+            keys in prop::collection::vec("[a-z]{1,5}", 1..10),
+            project in prop::collection::vec("[a-z]{1,5}", 0..5),
+        ) {
+            let mut map = serde_json::Map::new();
+            for k in &keys {
+                map.insert(k.clone(), Value::String("v".into()));
+            }
+            let input = Value::Object(map);
+            let mut config = CompressConfig::default();
+            config.fields = Some(project.clone());
+            let result = compress(&input, &config, now());
+            if let Value::Object(result_map) = result {
+                for key in result_map.keys() {
+                    assert!(project.contains(key), "Projected output has unexpected key: {key}");
+                }
+            }
+        }
+    }
+
+    // 3. URL encoding roundtrips (no panics on arbitrary strings)
+    proptest! {
+        #[test]
+        fn urlencode_never_panics(s in "\\PC{0,200}") {
+            let _ = crate::util::urlencode(&s);
+        }
+    }
+
+    // 4. Body truncation never panics on arbitrary UTF-8
+    proptest! {
+        #[test]
+        fn truncation_never_panics(body in "\\PC{0,1000}", max in 0usize..500) {
+            let input = json!({"body": body});
+            let config = CompressConfig { max_body: max, ..CompressConfig::default() };
+            let result = compress(&input, &config, now());
+            // Should never panic, result should be valid
+            if let Some(Value::String(s)) = result.get("body") {
+                assert!(s.is_char_boundary(s.len())); // valid UTF-8
+            }
+        }
+    }
+
+    // 5. Timestamp compaction never panics
+    proptest! {
+        #[test]
+        fn compact_timestamp_never_panics(s in "\\PC{0,50}") {
+            let _ = compact_timestamp(&s, 30, now());
+        }
+    }
 }

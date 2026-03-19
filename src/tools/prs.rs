@@ -368,69 +368,85 @@ pub async fn update_branch(
     client.api(&endpoint, &["-X", "PUT"]).await
 }
 
-// --- Testable helpers ---
+// --- Testable helpers (only used in tests) ---
 
+#[cfg(test)]
 fn list_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/pulls")
 }
 
+#[cfg(test)]
 fn get_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/pulls/{number}")
 }
 
+#[cfg(test)]
 fn diff_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/pulls/{number}")
 }
 
+#[cfg(test)]
 fn files_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/pulls/{number}/files")
 }
 
+#[cfg(test)]
 fn reviews_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/pulls/{number}/reviews")
 }
 
+#[cfg(test)]
 fn review_comments_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/pulls/{number}/comments")
 }
 
+#[cfg(test)]
 fn comments_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/issues/{number}/comments")
 }
 
+#[cfg(test)]
 fn check_runs_endpoint(owner: &str, repo: &str, sha: &str) -> String {
     format!("/repos/{owner}/{repo}/commits/{sha}/check-runs")
 }
 
+#[cfg(test)]
 fn status_endpoint(owner: &str, repo: &str, sha: &str) -> String {
     format!("/repos/{owner}/{repo}/commits/{sha}/status")
 }
 
+#[cfg(test)]
 fn merge_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/pulls/{number}/merge")
 }
 
+#[cfg(test)]
 fn update_branch_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/pulls/{number}/update-branch")
 }
 
+#[cfg(test)]
 fn search_url(query: &str, per_page: u32) -> String {
     let full_query = format!("{query} type:pr");
     format!("/search/issues?q={}&per_page={per_page}", crate::util::urlencode(&full_query))
 }
 
+#[cfg(test)]
 fn reply_endpoint(owner: &str, repo: &str, number: u32, comment_id: u64) -> String {
     format!("/repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies")
 }
 
+#[cfg(test)]
 fn submit_review_endpoint(owner: &str, repo: &str, number: u32, review_id: u64) -> String {
     format!("/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/events")
 }
 
+#[cfg(test)]
 fn delete_review_endpoint(owner: &str, repo: &str, number: u32, review_id: u64) -> String {
     format!("/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}")
 }
 
+#[cfg(test)]
 fn create_args(title: &str, head: &str, base: &str, body: Option<&str>, draft: Option<bool>) -> Vec<String> {
     let mut args = vec![
         "-X".into(), "POST".into(),
@@ -449,6 +465,7 @@ fn create_args(title: &str, head: &str, base: &str, body: Option<&str>, draft: O
     args
 }
 
+#[cfg(test)]
 fn update_args(title: Option<&str>, body: Option<&str>, state: Option<&str>, base: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec!["-X".into(), "PATCH".into()];
     if let Some(t) = title {
@@ -470,6 +487,7 @@ fn update_args(title: Option<&str>, body: Option<&str>, state: Option<&str>, bas
     args
 }
 
+#[cfg(test)]
 fn merge_args(merge_method: Option<&str>, commit_title: Option<&str>, commit_message: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec!["-X".into(), "PUT".into()];
     if let Some(m) = merge_method {
@@ -487,6 +505,7 @@ fn merge_args(merge_method: Option<&str>, commit_title: Option<&str>, commit_mes
     args
 }
 
+#[cfg(test)]
 fn create_review_args(event: &str, body: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-X".into(), "POST".into(),
@@ -499,6 +518,7 @@ fn create_review_args(event: &str, body: Option<&str>) -> Vec<String> {
     args
 }
 
+#[cfg(test)]
 fn add_review_comment_args(path: &str, body: &str, line: Option<u32>, side: Option<&str>, subject_type: Option<&str>, commit_id: &str) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-X".into(), "POST".into(),
@@ -522,6 +542,7 @@ fn add_review_comment_args(path: &str, body: &str, line: Option<u32>, side: Opti
     args
 }
 
+#[cfg(test)]
 fn extract_search_items(result: &Value) -> Option<Value> {
     if let Value::Object(ref map) = result {
         if let Some(items) = map.get("items") {

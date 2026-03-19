@@ -76,18 +76,22 @@ pub async fn get_latest(
     client.api(&endpoint, &[]).await
 }
 
+#[cfg(test)]
 fn list_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/releases")
 }
 
+#[cfg(test)]
 fn get_by_tag_endpoint(owner: &str, repo: &str, tag: &str) -> String {
     format!("/repos/{owner}/{repo}/releases/tags/{tag}")
 }
 
+#[cfg(test)]
 fn latest_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/releases/latest")
 }
 
+#[cfg(test)]
 fn create_args(tag_name: &str, name: Option<&str>, body: Option<&str>, draft: Option<bool>, prerelease: Option<bool>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-X".into(), "POST".into(),

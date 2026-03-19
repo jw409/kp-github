@@ -29,10 +29,12 @@ pub async fn search(
     Ok(result)
 }
 
+#[cfg(test)]
 fn search_url(query: &str, per_page: u32) -> String {
     format!("/search/users?q={}&per_page={per_page}", crate::util::urlencode(query))
 }
 
+#[cfg(test)]
 fn extract_search_items(result: &Value) -> Option<Value> {
     if let Value::Object(ref map) = result {
         if let Some(items) = map.get("items") {

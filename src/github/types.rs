@@ -1,11 +1,13 @@
 use serde::Deserialize;
 
+#[allow(dead_code)] // Used in tests; kept for future Phase 4 query planner
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepoRef {
     pub owner: String,
     pub repo: String,
 }
 
+#[allow(dead_code)]
 impl RepoRef {
     pub fn new(owner: impl Into<String>, repo: impl Into<String>) -> Self {
         Self {
@@ -21,6 +23,7 @@ impl RepoRef {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
@@ -29,6 +32,7 @@ pub enum State {
     All,
 }
 
+#[allow(dead_code)]
 impl State {
     pub fn as_str(&self) -> &str {
         match self {
@@ -39,6 +43,7 @@ impl State {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortDirection {

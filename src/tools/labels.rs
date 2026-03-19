@@ -100,15 +100,18 @@ pub async fn delete(
     client.api(&endpoint, &["-X", "DELETE"]).await
 }
 
+#[cfg(test)]
 fn get_endpoint(owner: &str, repo: &str, name: &str) -> String {
     let encoded = crate::util::urlencode(name);
     format!("/repos/{owner}/{repo}/labels/{encoded}")
 }
 
+#[cfg(test)]
 fn list_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/labels")
 }
 
+#[cfg(test)]
 fn create_args(name: &str, color: Option<&str>, description: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-X".into(), "POST".into(),
@@ -125,6 +128,7 @@ fn create_args(name: &str, color: Option<&str>, description: Option<&str>) -> Ve
     args
 }
 
+#[cfg(test)]
 fn update_args(new_name: Option<&str>, color: Option<&str>, description: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec!["-X".into(), "PATCH".into()];
     if let Some(n) = new_name {

@@ -81,10 +81,15 @@ pub async fn delete(
     client.api(&endpoint, &args).await
 }
 
-/// Push multiple files to a repository.
+/// Push multiple files to a repository atomically via the Git Data API.
 ///
-/// V0.1: sequential create_or_update calls per file (creates separate commits).
-/// Future version will use the Git Data API for atomic single-commit pushes.
+/// Creates a single commit containing all file changes. Uses:
+/// 1. GET ref → current commit SHA
+/// 2. GET commit → current tree SHA
+/// 3. POST blobs → blob SHAs for each file
+/// 4. POST tree → new tree SHA
+/// 5. POST commit → new commit SHA
+/// 6. PATCH ref → update branch
 ///
 /// `files_json` must be a JSON string containing an array of objects with
 /// `path` and `content` fields. Content should be base64-encoded.
@@ -99,41 +104,99 @@ pub async fn push_files(
     let files: Vec<serde_json::Value> = serde_json::from_str(files_json)
         .map_err(|e| ClientError::Api(format!("invalid files_json: {e}")))?;
 
-    let mut results = Vec::new();
-    for file in &files {
-        let path = file["path"]
-            .as_str()
-            .ok_or_else(|| ClientError::Api("each file must have a 'path' string".into()))?;
-        let content = file["content"]
-            .as_str()
-            .ok_or_else(|| ClientError::Api("each file must have a 'content' string".into()))?;
-
-        // Try to get existing file SHA for updates
-        let sha = match get_contents(client, owner, repo, path, Some(branch)).await {
-            Ok(existing) => existing["sha"].as_str().map(|s| s.to_string()),
-            Err(_) => None,
-        };
-
-        let result = create_or_update(
-            client,
-            owner,
-            repo,
-            path,
-            content,
-            message,
-            branch,
-            sha.as_deref(),
-        )
-        .await?;
-        results.push(result);
+    if files.is_empty() {
+        return Err(ClientError::Api("files_json array is empty".into()));
     }
 
+    // Validate all files upfront
+    for file in &files {
+        file["path"]
+            .as_str()
+            .ok_or_else(|| ClientError::Api("each file must have a 'path' string".into()))?;
+        file["content"]
+            .as_str()
+            .ok_or_else(|| ClientError::Api("each file must have a 'content' string".into()))?;
+    }
+
+    // Step 1: Get current commit SHA from branch ref
+    let ref_endpoint = format!("/repos/{owner}/{repo}/git/ref/heads/{branch}");
+    let ref_data = client.api(&ref_endpoint, &[]).await?;
+    let commit_sha = ref_data["object"]["sha"]
+        .as_str()
+        .ok_or_else(|| ClientError::Api("could not get commit SHA from ref".into()))?;
+
+    // Step 2: Get tree SHA from current commit
+    let commit_endpoint = format!("/repos/{owner}/{repo}/git/commits/{commit_sha}");
+    let commit_data = client.api(&commit_endpoint, &[]).await?;
+    let base_tree_sha = commit_data["tree"]["sha"]
+        .as_str()
+        .ok_or_else(|| ClientError::Api("could not get tree SHA from commit".into()))?;
+
+    // Step 3: Create blobs for each file
+    let mut tree_entries = Vec::new();
+    for file in &files {
+        let file_path = file["path"].as_str().unwrap(); // validated above
+        let content = file["content"].as_str().unwrap(); // validated above
+
+        let blob_endpoint = format!("/repos/{owner}/{repo}/git/blobs");
+        let blob_body = serde_json::json!({
+            "content": content,
+            "encoding": "base64"
+        });
+        let blob_result = client.api_json(&blob_endpoint, "POST", &blob_body).await?;
+        let blob_sha = blob_result["sha"]
+            .as_str()
+            .ok_or_else(|| ClientError::Api("could not get blob SHA".into()))?;
+
+        tree_entries.push(serde_json::json!({
+            "path": file_path,
+            "mode": "100644",
+            "type": "blob",
+            "sha": blob_sha
+        }));
+    }
+
+    // Step 4: Create new tree
+    let tree_endpoint = format!("/repos/{owner}/{repo}/git/trees");
+    let tree_body = serde_json::json!({
+        "base_tree": base_tree_sha,
+        "tree": tree_entries
+    });
+    let tree_result = client.api_json(&tree_endpoint, "POST", &tree_body).await?;
+    let new_tree_sha = tree_result["sha"]
+        .as_str()
+        .ok_or_else(|| ClientError::Api("could not get new tree SHA".into()))?;
+
+    // Step 5: Create new commit
+    let new_commit_endpoint = format!("/repos/{owner}/{repo}/git/commits");
+    let new_commit_body = serde_json::json!({
+        "message": message,
+        "tree": new_tree_sha,
+        "parents": [commit_sha]
+    });
+    let new_commit_result = client
+        .api_json(&new_commit_endpoint, "POST", &new_commit_body)
+        .await?;
+    let new_commit_sha = new_commit_result["sha"]
+        .as_str()
+        .ok_or_else(|| ClientError::Api("could not get new commit SHA".into()))?;
+
+    // Step 6: Update branch ref to point to new commit
+    let update_ref_endpoint = format!("/repos/{owner}/{repo}/git/refs/heads/{branch}");
+    let update_ref_body = serde_json::json!({
+        "sha": new_commit_sha
+    });
+    client
+        .api_json(&update_ref_endpoint, "PATCH", &update_ref_body)
+        .await?;
+
     Ok(serde_json::json!({
-        "files_pushed": results.len(),
-        "results": results,
+        "files_pushed": files.len(),
+        "commit_sha": new_commit_sha,
     }))
 }
 
+#[cfg(test)]
 fn get_contents_endpoint(owner: &str, repo: &str, path: &str, git_ref: Option<&str>) -> String {
     let mut endpoint = format!("/repos/{owner}/{repo}/contents/{path}");
     if let Some(r) = git_ref {
@@ -142,10 +205,12 @@ fn get_contents_endpoint(owner: &str, repo: &str, path: &str, git_ref: Option<&s
     endpoint
 }
 
+#[cfg(test)]
 fn contents_endpoint(owner: &str, repo: &str, path: &str) -> String {
     format!("/repos/{owner}/{repo}/contents/{path}")
 }
 
+#[cfg(test)]
 fn create_or_update_args(content: &str, message: &str, branch: &str, sha: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "-X".into(), "PUT".into(),
@@ -160,6 +225,7 @@ fn create_or_update_args(content: &str, message: &str, branch: &str, sha: Option
     args
 }
 
+#[cfg(test)]
 fn delete_args(message: &str, branch: &str, sha: &str) -> Vec<String> {
     vec![
         "-X".into(), "DELETE".into(),
@@ -258,14 +324,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_push_files_fn() {
+    async fn test_push_files_atomic_single_file() {
+        // Git Data API flow: ref → commit → blob → tree → commit → update ref
         let client = GithubClient::mock(vec![
-            json!({"sha": "existing"}),  // get_contents for first file
-            json!({"content": {"path": "a.txt"}}),  // create_or_update
+            json!({"object": {"sha": "commit111"}}),           // GET ref
+            json!({"tree": {"sha": "tree111"}}),               // GET commit
+            json!({"sha": "blob111"}),                          // POST blob
+            json!({"sha": "newtree111"}),                       // POST tree
+            json!({"sha": "newcommit111"}),                     // POST commit
+            json!({"ref": "refs/heads/main"}),                  // PATCH ref
         ]);
         let files_json = r#"[{"path":"a.txt","content":"aGk="}]"#;
         let result = push_files(&client, "o", "r", "main", "push", files_json).await.unwrap();
         assert_eq!(result["files_pushed"], 1);
+        assert_eq!(result["commit_sha"], "newcommit111");
+    }
+
+    #[tokio::test]
+    async fn test_push_files_atomic_multiple_files() {
+        // 2 files: ref → commit → blob1 → blob2 → tree → commit → update ref
+        let client = GithubClient::mock(vec![
+            json!({"object": {"sha": "commit222"}}),
+            json!({"tree": {"sha": "tree222"}}),
+            json!({"sha": "blobA"}),                            // blob for file 1
+            json!({"sha": "blobB"}),                            // blob for file 2
+            json!({"sha": "newtree222"}),
+            json!({"sha": "newcommit222"}),
+            json!({"ref": "refs/heads/main"}),
+        ]);
+        let files_json = r#"[{"path":"a.txt","content":"aGk="},{"path":"b.txt","content":"d29ybGQ="}]"#;
+        let result = push_files(&client, "o", "r", "main", "add files", files_json).await.unwrap();
+        assert_eq!(result["files_pushed"], 2);
+        assert_eq!(result["commit_sha"], "newcommit222");
     }
 
     #[tokio::test]
@@ -284,23 +374,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_push_files_missing_content() {
-        let client = GithubClient::mock(vec![
-            json!({"sha": "existing"}),  // get_contents
-        ]);
+        let client = GithubClient::mock(vec![]);
         let result = push_files(&client, "o", "r", "main", "push", r#"[{"path":"a.txt"}]"#).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn test_push_files_new_file() {
+    async fn test_push_files_empty_array() {
+        let client = GithubClient::mock(vec![]);
+        let result = push_files(&client, "o", "r", "main", "push", "[]").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn test_push_files_ref_not_found() {
         use crate::github::client::ClientError;
-        // get_contents fails (file doesn't exist), then create succeeds
         let client = GithubClient::mock_results(vec![
-            Err(ClientError::Api("404".into())),
-            Ok(json!({"content": {"path": "new.txt"}})),
+            Err(ClientError::Api("404: branch not found".into())),
         ]);
-        let result = push_files(&client, "o", "r", "main", "push",
-            r#"[{"path":"new.txt","content":"aGk="}]"#).await.unwrap();
-        assert_eq!(result["files_pushed"], 1);
+        let result = push_files(&client, "o", "r", "nope", "push",
+            r#"[{"path":"a.txt","content":"aGk="}]"#).await;
+        assert!(result.is_err());
     }
 }

@@ -112,10 +112,12 @@ pub async fn fork(
     client.api(&endpoint, &args).await
 }
 
+#[cfg(test)]
 fn get_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}")
 }
 
+#[cfg(test)]
 fn create_endpoint(org: Option<&str>) -> String {
     match org {
         Some(o) => format!("/orgs/{o}/repos"),
@@ -123,18 +125,22 @@ fn create_endpoint(org: Option<&str>) -> String {
     }
 }
 
+#[cfg(test)]
 fn compare_endpoint(owner: &str, repo: &str, base: &str, head: &str) -> String {
     format!("/repos/{owner}/{repo}/compare/{base}...{head}")
 }
 
+#[cfg(test)]
 fn fork_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/forks")
 }
 
+#[cfg(test)]
 fn search_url(query: &str, per_page: u32) -> String {
     format!("/search/repositories?q={}&per_page={per_page}", crate::util::urlencode(query))
 }
 
+#[cfg(test)]
 fn extract_search_items(result: &Value, limit: Option<u32>) -> Value {
     match result {
         Value::Object(ref map) => {

@@ -26,14 +26,17 @@ pub async fn create(
     client.api(&endpoint, &args).await
 }
 
+#[cfg(test)]
 fn list_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/branches")
 }
 
+#[cfg(test)]
 fn create_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/git/refs")
 }
 
+#[cfg(test)]
 fn create_ref_field(branch: &str) -> String {
     format!("ref=refs/heads/{branch}")
 }

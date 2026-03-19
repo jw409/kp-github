@@ -197,43 +197,45 @@ pub async fn list_issue_types(
     client.api(&endpoint, &[]).await
 }
 
-/// Build the endpoint for listing issues.
+// --- Testable helpers (only used in tests) ---
+
+#[cfg(test)]
 fn list_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/issues")
 }
 
-/// Build the endpoint for getting a single issue.
+#[cfg(test)]
 fn get_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/issues/{number}")
 }
 
-/// Build the search URL.
+#[cfg(test)]
 fn search_url(query: &str, per_page: u32) -> String {
     let full_query = format!("{query} type:issue");
     format!("/search/issues?q={}&per_page={per_page}", crate::util::urlencode(&full_query))
 }
 
-/// Build the comments endpoint.
+#[cfg(test)]
 fn comments_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/issues/{number}/comments")
 }
 
-/// Build the labels endpoint.
+#[cfg(test)]
 fn labels_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/issues/{number}/labels")
 }
 
-/// Build the sub-issues endpoint.
+#[cfg(test)]
 fn sub_issues_endpoint(owner: &str, repo: &str, number: u32) -> String {
     format!("/repos/{owner}/{repo}/issues/{number}/sub_issues")
 }
 
-/// Build the issue-types endpoint.
+#[cfg(test)]
 fn issue_types_endpoint(owner: &str) -> String {
     format!("/orgs/{owner}/issue-types")
 }
 
-/// Build args for creating an issue.
+#[cfg(test)]
 fn create_args(title: &str, body: Option<&str>, labels: &Option<Vec<String>>, assignees: &Option<Vec<String>>) -> Vec<String> {
     let mut args: Vec<String> = vec!["-X".into(), "POST".into()];
     args.push("-f".into());
@@ -257,7 +259,7 @@ fn create_args(title: &str, body: Option<&str>, labels: &Option<Vec<String>>, as
     args
 }
 
-/// Build args for updating an issue.
+#[cfg(test)]
 fn update_args(
     title: &Option<String>,
     body: &Option<String>,
@@ -293,7 +295,7 @@ fn update_args(
     args
 }
 
-/// Extract items from a search response.
+#[cfg(test)]
 fn extract_search_items(result: &Value) -> Option<Value> {
     if let Value::Object(ref map) = result {
         if let Some(items) = map.get("items") {

@@ -24,10 +24,12 @@ pub async fn get(
     client.api(&endpoint, &[]).await
 }
 
+#[cfg(test)]
 fn list_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/tags")
 }
 
+#[cfg(test)]
 fn get_endpoint(owner: &str, repo: &str, tag: &str) -> String {
     format!("/repos/{owner}/{repo}/git/ref/tags/{tag}")
 }

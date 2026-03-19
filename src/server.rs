@@ -5,7 +5,7 @@ use rmcp::model::{
     CallToolResult, Content, ListResourceTemplatesResult, ReadResourceRequestParams,
     ReadResourceResult, ResourceContents, ServerInfo,
 };
-use rmcp::{Error as McpError, ServerHandler, ServiceExt};
+use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -62,6 +62,7 @@ impl KpGithubServer {
 // --- Parameter structs ---
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[allow(dead_code)] // Used in tests
 pub struct RepoParams {
     /// Repository owner
     pub owner: String,
@@ -2829,10 +2830,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_files_push() {
-        // push_files calls get_contents (to check existing), then create_or_update
+        // push_files uses Git Data API: ref → commit → blob → tree → commit → update ref
         let server = mock_server(vec![
-            json!({"sha": "existing_sha"}),  // get_contents for file a.txt
-            json!({"content": {"path": "a.txt"}}),  // create_or_update
+            json!({"object": {"sha": "commit_abc"}}),   // GET ref
+            json!({"tree": {"sha": "tree_abc"}}),        // GET commit
+            json!({"sha": "blob_abc"}),                   // POST blob
+            json!({"sha": "newtree_abc"}),                // POST tree
+            json!({"sha": "newcommit_abc"}),              // POST commit
+            json!({"ref": "refs/heads/main"}),             // PATCH ref
         ]);
         let result = server.github_files_push(Parameters(FilePushParams {
             owner: "o".into(), repo: "r".into(), branch: "main".into(),

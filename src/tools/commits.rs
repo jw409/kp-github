@@ -29,10 +29,12 @@ pub async fn get(
     client.api(&endpoint, &[]).await
 }
 
+#[cfg(test)]
 fn list_endpoint(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/commits")
 }
 
+#[cfg(test)]
 fn get_endpoint(owner: &str, repo: &str, sha: &str) -> String {
     format!("/repos/{owner}/{repo}/commits/{sha}")
 }
