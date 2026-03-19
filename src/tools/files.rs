@@ -1,0 +1,306 @@
+use serde_json::Value;
+
+use crate::github::client::{ClientError, GithubClient};
+
+/// Get file or directory contents from a repository.
+///
+/// Returns file content (base64-encoded) and metadata, or directory listing.
+pub async fn get_contents(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    git_ref: Option<&str>,
+) -> Result<Value, ClientError> {
+    let mut endpoint = format!("/repos/{owner}/{repo}/contents/{path}");
+    if let Some(r) = git_ref {
+        endpoint.push_str(&format!("?ref={r}"));
+    }
+    client.api(&endpoint, &[]).await
+}
+
+/// Create or update a file in a repository.
+///
+/// Uses PUT /repos/{owner}/{repo}/contents/{path}.
+/// The `content` parameter **must** be base64-encoded by the caller,
+/// matching the GitHub API contract.
+/// If `sha` is provided, the file is updated (overwritten); otherwise it is created.
+pub async fn create_or_update(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    content: &str,
+    message: &str,
+    branch: &str,
+    sha: Option<&str>,
+) -> Result<Value, ClientError> {
+    let endpoint = format!("/repos/{owner}/{repo}/contents/{path}");
+
+    let content_field = format!("content={content}");
+    let message_field = format!("message={message}");
+    let branch_field = format!("branch={branch}");
+
+    let mut args = vec!["-X", "PUT", "-f", &content_field, "-f", &message_field, "-f", &branch_field];
+
+    let sha_field;
+    if let Some(s) = sha {
+        sha_field = format!("sha={s}");
+        args.push("-f");
+        args.push(&sha_field);
+    }
+
+    client.api(&endpoint, &args).await
+}
+
+/// Delete a file from a repository.
+///
+/// Requires the blob SHA of the file being deleted.
+pub async fn delete(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    message: &str,
+    branch: &str,
+    sha: &str,
+) -> Result<Value, ClientError> {
+    let endpoint = format!("/repos/{owner}/{repo}/contents/{path}");
+
+    let message_field = format!("message={message}");
+    let branch_field = format!("branch={branch}");
+    let sha_field = format!("sha={sha}");
+
+    let args = vec![
+        "-X", "DELETE",
+        "-f", &message_field,
+        "-f", &branch_field,
+        "-f", &sha_field,
+    ];
+
+    client.api(&endpoint, &args).await
+}
+
+/// Push multiple files to a repository.
+///
+/// V0.1: sequential create_or_update calls per file (creates separate commits).
+/// Future version will use the Git Data API for atomic single-commit pushes.
+///
+/// `files_json` must be a JSON string containing an array of objects with
+/// `path` and `content` fields. Content should be base64-encoded.
+pub async fn push_files(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    message: &str,
+    files_json: &str,
+) -> Result<Value, ClientError> {
+    let files: Vec<serde_json::Value> = serde_json::from_str(files_json)
+        .map_err(|e| ClientError::Api(format!("invalid files_json: {e}")))?;
+
+    let mut results = Vec::new();
+    for file in &files {
+        let path = file["path"]
+            .as_str()
+            .ok_or_else(|| ClientError::Api("each file must have a 'path' string".into()))?;
+        let content = file["content"]
+            .as_str()
+            .ok_or_else(|| ClientError::Api("each file must have a 'content' string".into()))?;
+
+        // Try to get existing file SHA for updates
+        let sha = match get_contents(client, owner, repo, path, Some(branch)).await {
+            Ok(existing) => existing["sha"].as_str().map(|s| s.to_string()),
+            Err(_) => None,
+        };
+
+        let result = create_or_update(
+            client,
+            owner,
+            repo,
+            path,
+            content,
+            message,
+            branch,
+            sha.as_deref(),
+        )
+        .await?;
+        results.push(result);
+    }
+
+    Ok(serde_json::json!({
+        "files_pushed": results.len(),
+        "results": results,
+    }))
+}
+
+fn get_contents_endpoint(owner: &str, repo: &str, path: &str, git_ref: Option<&str>) -> String {
+    let mut endpoint = format!("/repos/{owner}/{repo}/contents/{path}");
+    if let Some(r) = git_ref {
+        endpoint.push_str(&format!("?ref={r}"));
+    }
+    endpoint
+}
+
+fn contents_endpoint(owner: &str, repo: &str, path: &str) -> String {
+    format!("/repos/{owner}/{repo}/contents/{path}")
+}
+
+fn create_or_update_args(content: &str, message: &str, branch: &str, sha: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "-X".into(), "PUT".into(),
+        "-f".into(), format!("content={content}"),
+        "-f".into(), format!("message={message}"),
+        "-f".into(), format!("branch={branch}"),
+    ];
+    if let Some(s) = sha {
+        args.push("-f".into());
+        args.push(format!("sha={s}"));
+    }
+    args
+}
+
+fn delete_args(message: &str, branch: &str, sha: &str) -> Vec<String> {
+    vec![
+        "-X".into(), "DELETE".into(),
+        "-f".into(), format!("message={message}"),
+        "-f".into(), format!("branch={branch}"),
+        "-f".into(), format!("sha={sha}"),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_get_contents_endpoint_no_ref() {
+        assert_eq!(
+            get_contents_endpoint("o", "r", "src/main.rs", None),
+            "/repos/o/r/contents/src/main.rs"
+        );
+    }
+
+    #[test]
+    fn test_get_contents_endpoint_with_ref() {
+        let ep = get_contents_endpoint("o", "r", "README.md", Some("v1.0"));
+        assert_eq!(ep, "/repos/o/r/contents/README.md?ref=v1.0");
+    }
+
+    #[test]
+    fn test_contents_endpoint() {
+        assert_eq!(contents_endpoint("o", "r", "a/b.txt"), "/repos/o/r/contents/a/b.txt");
+    }
+
+    #[test]
+    fn test_create_or_update_args_new_file() {
+        let args = create_or_update_args("SGVsbG8=", "add file", "main", None);
+        assert!(args.contains(&"-X".to_string()));
+        assert!(args.contains(&"PUT".to_string()));
+        assert!(args.contains(&"content=SGVsbG8=".to_string()));
+        assert!(args.contains(&"message=add file".to_string()));
+        assert!(args.contains(&"branch=main".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("sha=")));
+    }
+
+    #[test]
+    fn test_create_or_update_args_update_file() {
+        let args = create_or_update_args("data", "update", "dev", Some("abc123"));
+        assert!(args.contains(&"sha=abc123".to_string()));
+    }
+
+    #[test]
+    fn test_delete_args() {
+        let args = delete_args("remove old", "main", "def456");
+        assert!(args.contains(&"-X".to_string()));
+        assert!(args.contains(&"DELETE".to_string()));
+        assert!(args.contains(&"message=remove old".to_string()));
+        assert!(args.contains(&"branch=main".to_string()));
+        assert!(args.contains(&"sha=def456".to_string()));
+    }
+
+    // --- Async tests with mock client ---
+
+    #[tokio::test]
+    async fn test_get_contents_fn() {
+        let client = GithubClient::mock(vec![json!({"name": "lib.rs", "type": "file"})]);
+        let result = get_contents(&client, "o", "r", "src/lib.rs", None).await.unwrap();
+        assert_eq!(result["name"], "lib.rs");
+    }
+
+    #[tokio::test]
+    async fn test_get_contents_with_ref() {
+        let client = GithubClient::mock(vec![json!({"name": "lib.rs"})]);
+        let result = get_contents(&client, "o", "r", "src/lib.rs", Some("v1.0")).await.unwrap();
+        assert_eq!(result["name"], "lib.rs");
+    }
+
+    #[tokio::test]
+    async fn test_create_or_update_fn() {
+        let client = GithubClient::mock(vec![json!({"content": {"path": "f.txt"}})]);
+        let result = create_or_update(&client, "o", "r", "f.txt", "SGVsbG8=", "add", "main", None).await.unwrap();
+        assert!(result["content"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_create_or_update_with_sha() {
+        let client = GithubClient::mock(vec![json!({"content": {"path": "f.txt"}})]);
+        let result = create_or_update(&client, "o", "r", "f.txt", "data", "update", "main", Some("abc123")).await.unwrap();
+        assert!(result["content"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_delete_fn() {
+        let client = GithubClient::mock(vec![json!({"commit": {"sha": "abc"}})]);
+        let result = delete(&client, "o", "r", "old.txt", "remove", "main", "sha123").await.unwrap();
+        assert!(result["commit"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_push_files_fn() {
+        let client = GithubClient::mock(vec![
+            json!({"sha": "existing"}),  // get_contents for first file
+            json!({"content": {"path": "a.txt"}}),  // create_or_update
+        ]);
+        let files_json = r#"[{"path":"a.txt","content":"aGk="}]"#;
+        let result = push_files(&client, "o", "r", "main", "push", files_json).await.unwrap();
+        assert_eq!(result["files_pushed"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_push_files_invalid_json() {
+        let client = GithubClient::mock(vec![]);
+        let result = push_files(&client, "o", "r", "main", "push", "not json").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_push_files_missing_path() {
+        let client = GithubClient::mock(vec![]);
+        let result = push_files(&client, "o", "r", "main", "push", r#"[{"content":"aGk="}]"#).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_push_files_missing_content() {
+        let client = GithubClient::mock(vec![
+            json!({"sha": "existing"}),  // get_contents
+        ]);
+        let result = push_files(&client, "o", "r", "main", "push", r#"[{"path":"a.txt"}]"#).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_push_files_new_file() {
+        use crate::github::client::ClientError;
+        // get_contents fails (file doesn't exist), then create succeeds
+        let client = GithubClient::mock_results(vec![
+            Err(ClientError::Api("404".into())),
+            Ok(json!({"content": {"path": "new.txt"}})),
+        ]);
+        let result = push_files(&client, "o", "r", "main", "push",
+            r#"[{"path":"new.txt","content":"aGk="}]"#).await.unwrap();
+        assert_eq!(result["files_pushed"], 1);
+    }
+}
