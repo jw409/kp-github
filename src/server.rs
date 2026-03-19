@@ -77,12 +77,16 @@ pub struct IssuesListParams {
     /// Repository name
     pub repo: String,
     /// Filter by state: open, closed, all
+    #[serde(default)]
     pub state: Option<String>,
     /// Maximum number of results
+    #[serde(default)]
     pub limit: Option<u32>,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -95,8 +99,10 @@ pub struct IssueGetParams {
     /// Issue number
     pub number: u32,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -105,10 +111,13 @@ pub struct SearchParams {
     /// Search query (GitHub search syntax)
     pub query: String,
     /// Maximum number of results
+    #[serde(default)]
     pub limit: Option<u32>,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -121,10 +130,13 @@ pub struct IssueCreateParams {
     /// Issue title
     pub title: String,
     /// Issue body
+    #[serde(default)]
     pub body: Option<String>,
     /// Labels to apply
+    #[serde(default)]
     pub labels: Option<Vec<String>>,
     /// Assignees
+    #[serde(default)]
     pub assignees: Option<Vec<String>>,
 }
 
@@ -137,14 +149,19 @@ pub struct IssueUpdateParams {
     /// Issue number
     pub number: u32,
     /// New title
+    #[serde(default)]
     pub title: Option<String>,
     /// New body
+    #[serde(default)]
     pub body: Option<String>,
     /// New state: open, closed
+    #[serde(default)]
     pub state: Option<String>,
     /// Labels to set
+    #[serde(default)]
     pub labels: Option<Vec<String>>,
     /// Assignees to set
+    #[serde(default)]
     pub assignees: Option<Vec<String>>,
 }
 
@@ -169,8 +186,10 @@ pub struct PrGetParams {
     /// PR number
     pub number: u32,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -187,8 +206,10 @@ pub struct PrDiffParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FieldsOnlyParams {
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -199,12 +220,16 @@ pub struct CommitsListParams {
     /// Repository name
     pub repo: String,
     /// Branch name or SHA
+    #[serde(default)]
     pub sha: Option<String>,
     /// Maximum number of results
+    #[serde(default)]
     pub limit: Option<u32>,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -215,8 +240,10 @@ pub struct RepoFieldsParams {
     /// Repository name
     pub repo: String,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -227,10 +254,13 @@ pub struct RepoLimitParams {
     /// Repository name
     pub repo: String,
     /// Maximum number of results
+    #[serde(default)]
     pub limit: Option<u32>,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -245,10 +275,13 @@ pub struct IssueCommentsParams {
     /// Issue number
     pub number: u32,
     /// Maximum number of comments to return
+    #[serde(default)]
     pub limit: Option<u32>,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -261,8 +294,10 @@ pub struct IssueNumberFieldsParams {
     /// Issue number
     pub number: u32,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -279,8 +314,10 @@ pub struct PrCreateParams {
     /// Branch to merge into
     pub base: String,
     /// PR body/description
+    #[serde(default)]
     pub body: Option<String>,
     /// Create as draft PR
+    #[serde(default)]
     pub draft: Option<bool>,
 }
 
@@ -293,12 +330,16 @@ pub struct PrUpdateParams {
     /// PR number
     pub number: u32,
     /// New title
+    #[serde(default)]
     pub title: Option<String>,
     /// New body
+    #[serde(default)]
     pub body: Option<String>,
     /// New state: open, closed
+    #[serde(default)]
     pub state: Option<String>,
     /// New base branch
+    #[serde(default)]
     pub base: Option<String>,
 }
 
@@ -311,10 +352,13 @@ pub struct PrMergeParams {
     /// PR number
     pub number: u32,
     /// Merge method: merge, squash, rebase
+    #[serde(default)]
     pub merge_method: Option<String>,
     /// Title for the merge commit
+    #[serde(default)]
     pub commit_title: Option<String>,
     /// Message for the merge commit
+    #[serde(default)]
     pub commit_message: Option<String>,
 }
 
@@ -329,6 +373,7 @@ pub struct PrReviewCreateParams {
     /// Review event: APPROVE, REQUEST_CHANGES, COMMENT
     pub event: String,
     /// Review body/comment text
+    #[serde(default)]
     pub body: Option<String>,
 }
 
@@ -341,10 +386,13 @@ pub struct FileGetParams {
     /// Path to file or directory
     pub path: String,
     /// Git ref (branch, tag, or SHA)
+    #[serde(default)]
     pub git_ref: Option<String>,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -363,6 +411,7 @@ pub struct FileCreateOrUpdateParams {
     /// Branch to create/update the file in
     pub branch: String,
     /// Blob SHA of existing file (required for updates, omit for new files)
+    #[serde(default)]
     pub sha: Option<String>,
 }
 
@@ -387,10 +436,13 @@ pub struct RepoCreateParams {
     /// Repository name
     pub name: String,
     /// Repository description
+    #[serde(default)]
     pub description: Option<String>,
     /// Whether the repo should be private
+    #[serde(default)]
     pub private: Option<bool>,
     /// Organization to create the repo in (omit for personal account)
+    #[serde(default)]
     pub org: Option<String>,
 }
 
@@ -401,6 +453,7 @@ pub struct RepoForkParams {
     /// Repository name
     pub repo: String,
     /// Organization to fork into (omit for personal account)
+    #[serde(default)]
     pub org: Option<String>,
 }
 
@@ -425,8 +478,10 @@ pub struct CommitGetParams {
     /// Commit SHA
     pub sha: String,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -439,8 +494,10 @@ pub struct ReleaseByTagParams {
     /// Tag name (e.g. 'v1.0.0')
     pub tag: String,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -453,8 +510,10 @@ pub struct TagGetParams {
     /// Tag name
     pub tag: String,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -465,8 +524,10 @@ pub struct TeamMembersParams {
     /// Team slug
     pub team_slug: String,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -481,10 +542,13 @@ pub struct IssueSubIssuesParams {
     /// Issue number
     pub number: u32,
     /// Maximum number of results
+    #[serde(default)]
     pub limit: Option<u32>,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -493,8 +557,10 @@ pub struct OrgOwnerParams {
     /// Organization owner
     pub owner: String,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -511,10 +577,13 @@ pub struct PrReviewCommentParams {
     /// Comment body
     pub body: String,
     /// Line number in the diff to comment on
+    #[serde(default)]
     pub line: Option<u32>,
     /// Side of the diff: LEFT or RIGHT
+    #[serde(default)]
     pub side: Option<String>,
     /// Subject type: FILE or LINE
+    #[serde(default)]
     pub subject_type: Option<String>,
 }
 
@@ -545,6 +614,7 @@ pub struct PrSubmitReviewParams {
     /// Review event: APPROVE, REQUEST_CHANGES, COMMENT
     pub event: String,
     /// Optional body text
+    #[serde(default)]
     pub body: Option<String>,
 }
 
@@ -583,8 +653,10 @@ pub struct LabelGetParams {
     /// Label name
     pub name: String,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -597,8 +669,10 @@ pub struct LabelCreateParams {
     /// Label name
     pub name: String,
     /// Label color (hex without #)
+    #[serde(default)]
     pub color: Option<String>,
     /// Label description
+    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -611,10 +685,13 @@ pub struct LabelUpdateParams {
     /// Current label name
     pub name: String,
     /// New label name
+    #[serde(default)]
     pub new_name: Option<String>,
     /// New color (hex without #)
+    #[serde(default)]
     pub color: Option<String>,
     /// New description
+    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -637,8 +714,10 @@ pub struct ActionRunIdParams {
     /// Workflow run ID
     pub run_id: u64,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -663,8 +742,10 @@ pub struct CompareParams {
     /// Head branch/tag/SHA
     pub head: String,
     /// Fields to include in output
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
     /// Output format: json, table, text
+    #[serde(default)]
     pub format: Option<String>,
 }
 
@@ -677,12 +758,16 @@ pub struct ReleaseCreateParams {
     /// Tag name for the release
     pub tag_name: String,
     /// Release name/title
+    #[serde(default)]
     pub name: Option<String>,
     /// Release body/description
+    #[serde(default)]
     pub body: Option<String>,
     /// Create as draft
+    #[serde(default)]
     pub draft: Option<bool>,
     /// Mark as prerelease
+    #[serde(default)]
     pub prerelease: Option<bool>,
 }
 
