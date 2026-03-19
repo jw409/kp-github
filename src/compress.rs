@@ -165,6 +165,8 @@ fn stage1_strip(map: &mut Map<String, Value>, config: &CompressConfig) {
 fn stage2_flatten(map: &mut Map<String, Value>) {
     // user: { login: "alice", ... } -> user: "alice"
     flatten_to_field(map, "user", "login");
+    flatten_to_field(map, "author", "login");
+    flatten_to_field(map, "committer", "login");
     flatten_to_field(map, "creator", "login");
     flatten_to_field(map, "owner", "login");
     flatten_to_field(map, "merged_by", "login");
