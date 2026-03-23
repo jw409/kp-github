@@ -36,17 +36,29 @@ impl Default for CompressConfig {
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match std::env::var(key) {
+        Ok(v) => match v.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!("{key}={v:?} is not a valid usize, using default {default}");
+                default
+            }
+        },
+        Err(_) => default,
+    }
 }
 
 fn env_i64(key: &str, default: i64) -> i64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match std::env::var(key) {
+        Ok(v) => match v.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!("{key}={v:?} is not a valid i64, using default {default}");
+                default
+            }
+        },
+        Err(_) => default,
+    }
 }
 
 fn env_bool(key: &str, default: bool) -> bool {

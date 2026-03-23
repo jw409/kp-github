@@ -37,6 +37,24 @@ impl KpGithubServer {
         }
     }
 
+    /// Compress search results: compress the items array but preserve total_count/truncated metadata.
+    fn compress_and_format_search(&self, value: Value, fields: Option<Vec<String>>, format: Option<String>) -> String {
+        // If this is a search wrapper {items, total_count, truncated}, extract items for compression
+        if let Value::Object(ref map) = value {
+            if let Some(items) = map.get("items") {
+                let compressed_items = self.compress_and_format(items.clone(), fields, format);
+                let total = map.get("total_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let truncated = map.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
+                if truncated {
+                    return format!("{compressed_items}\n\n[{total} total results, showing first batch]");
+                }
+                return compressed_items;
+            }
+        }
+        // Fallback: not a search wrapper
+        self.compress_and_format(value, fields, format)
+    }
+
     fn compress_and_format(&self, value: Value, fields: Option<Vec<String>>, format: Option<String>) -> String {
         let fmt = format
             .as_deref()
@@ -800,7 +818,7 @@ impl KpGithubServer {
     async fn github_issues_search(&self, Parameters(p): Parameters<SearchParams>) -> Result<CallToolResult, McpError> {
         let result = tools::issues::search(&self.client, &p.query, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let output = self.compress_and_format(result, p.fields, p.format);
+        let output = self.compress_and_format_search(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -1039,7 +1057,7 @@ impl KpGithubServer {
     async fn github_repos_search(&self, Parameters(p): Parameters<SearchParams>) -> Result<CallToolResult, McpError> {
         let result = tools::repos::search(&self.client, &p.query, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let output = self.compress_and_format(result, p.fields, p.format);
+        let output = self.compress_and_format_search(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -1168,7 +1186,7 @@ impl KpGithubServer {
     async fn github_users_search(&self, Parameters(p): Parameters<SearchParams>) -> Result<CallToolResult, McpError> {
         let result = tools::user::search(&self.client, &p.query, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let output = self.compress_and_format(result, p.fields, p.format);
+        let output = self.compress_and_format_search(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -1179,7 +1197,7 @@ impl KpGithubServer {
     async fn github_code_search(&self, Parameters(p): Parameters<SearchParams>) -> Result<CallToolResult, McpError> {
         let result = tools::code_search::search(&self.client, &p.query, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let output = self.compress_and_format(result, p.fields, p.format);
+        let output = self.compress_and_format_search(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -1210,7 +1228,7 @@ impl KpGithubServer {
     async fn github_prs_search(&self, Parameters(p): Parameters<SearchParams>) -> Result<CallToolResult, McpError> {
         let result = tools::prs::search(&self.client, &p.query, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let output = self.compress_and_format(result, p.fields, p.format);
+        let output = self.compress_and_format_search(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 

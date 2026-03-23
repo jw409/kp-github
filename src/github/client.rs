@@ -11,6 +11,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 /// Maximum number of pages to fetch before stopping (circuit breaker).
 const MAX_PAGES: usize = 50;
+/// Maximum number of retries for 429/5xx responses.
+const MAX_RETRIES: u32 = 3;
 
 #[derive(Error, Debug)]
 pub enum ClientError {
@@ -77,58 +79,65 @@ impl GithubClient {
 
     /// Call GitHub API — GET request
     pub async fn api(&self, endpoint: &str, args: &[&str]) -> Result<Value, ClientError> {
+        validate_endpoint(endpoint)?;
         match &self.backend {
             Backend::Http { client, token } => {
-                // If args contain -X POST/PATCH, delegate to the write path
                 let method = extract_method(args);
                 let fields = extract_fields(args);
-
                 let url = format!("{}{endpoint}", self.base_url);
+                let body = if !fields.is_empty() { Some(fields_to_json(&fields)) } else { None };
 
-                let req = match method {
-                    "POST" => {
-                        let body = fields_to_json(&fields);
-                        client.post(&url).json(&body)
-                    }
-                    "PATCH" => {
-                        let body = fields_to_json(&fields);
-                        client.patch(&url).json(&body)
-                    }
-                    "PUT" => {
-                        let body = fields_to_json(&fields);
-                        client.put(&url).json(&body)
-                    }
-                    "DELETE" => {
-                        if fields.is_empty() {
-                            client.delete(&url)
-                        } else {
-                            let body = fields_to_json(&fields);
-                            client.delete(&url).json(&body)
+                let mut retries = 0u32;
+                loop {
+                    let req = match method {
+                        "POST" => {
+                            let r = client.post(&url);
+                            if let Some(ref b) = body { r.json(b) } else { r }
                         }
-                    }
-                    _ => client.get(&url),
-                };
+                        "PATCH" => {
+                            let r = client.patch(&url);
+                            if let Some(ref b) = body { r.json(b) } else { r }
+                        }
+                        "PUT" => {
+                            let r = client.put(&url);
+                            if let Some(ref b) = body { r.json(b) } else { r }
+                        }
+                        "DELETE" => {
+                            let r = client.delete(&url);
+                            if let Some(ref b) = body { r.json(b) } else { r }
+                        }
+                        _ => client.get(&url),
+                    };
 
-                let resp = req
-                    .header(AUTHORIZATION, format!("Bearer {token}"))
-                    .header(ACCEPT, "application/vnd.github+json")
-                    .header("X-GitHub-Api-Version", "2022-11-28")
-                    .send()
-                    .await?;
+                    let resp = req
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
+                        .header(ACCEPT, "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
 
-                check_rate_limit_and_retry(&resp);
+                    check_rate_limit_and_retry(&resp);
 
-                if !resp.status().is_success() {
                     let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(ClientError::Api(format!("{status}: {body}")));
-                }
+                    if is_retryable(status) && retries < MAX_RETRIES {
+                        let wait = retry_delay(&resp, retries);
+                        tracing::warn!("GitHub {status}, retrying in {wait:?} (attempt {}/{})", retries + 1, MAX_RETRIES);
+                        tokio::time::sleep(wait).await;
+                        retries += 1;
+                        continue;
+                    }
 
-                let text = resp.text().await?;
-                if text.trim().is_empty() {
-                    return Ok(Value::Null);
+                    if !status.is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(ClientError::Api(format!("{status}: {body}")));
+                    }
+
+                    let text = resp.text().await?;
+                    if text.trim().is_empty() {
+                        return Ok(Value::Null);
+                    }
+                    return Ok(serde_json::from_str(&text)?);
                 }
-                Ok(serde_json::from_str(&text)?)
             }
             Backend::GhCli => self.gh_cli_api(endpoint, args).await,
             #[cfg(test)]
@@ -146,6 +155,7 @@ impl GithubClient {
         query_params: &[(&str, &str)],
         limit: Option<u32>,
     ) -> Result<Value, ClientError> {
+        validate_endpoint(endpoint)?;
         let effective_limit = limit.unwrap_or(30);
         let per_page = effective_limit.min(100);
 
@@ -310,6 +320,7 @@ impl GithubClient {
         method: &str,
         body: &Value,
     ) -> Result<Value, ClientError> {
+        validate_endpoint(endpoint)?;
         match &self.backend {
             Backend::Http { client, token } => {
                 let url = format!("{}{endpoint}", self.base_url);
@@ -390,6 +401,7 @@ impl GithubClient {
 
     /// Call GitHub API with a custom Accept header, returning raw text.
     pub async fn api_raw(&self, endpoint: &str, accept: &str) -> Result<String, ClientError> {
+        validate_endpoint(endpoint)?;
         match &self.backend {
             Backend::Http { client, token } => {
                 let url = format!("{}{endpoint}", self.base_url);
@@ -472,6 +484,35 @@ impl GithubClient {
         }
         Ok(serde_json::from_str(&stdout)?)
     }
+}
+
+/// Check if an HTTP status code is retryable (429 rate limit, 5xx server errors).
+fn is_retryable(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// Calculate retry delay: use Retry-After header if present, otherwise exponential backoff.
+fn retry_delay(resp: &reqwest::Response, attempt: u32) -> Duration {
+    // Check Retry-After header (GitHub sends this on 429)
+    if let Some(val) = resp.headers().get("retry-after") {
+        if let Ok(secs) = val.to_str().unwrap_or("").parse::<u64>() {
+            return Duration::from_secs(secs.min(120)); // cap at 2 minutes
+        }
+    }
+    // Exponential backoff: 1s, 2s, 4s
+    Duration::from_secs(1 << attempt)
+}
+
+/// Validate that an API endpoint does not contain path traversal sequences.
+/// Allows `...` (GitHub compare syntax: `base...head`) but rejects `..` followed by `/`.
+fn validate_endpoint(endpoint: &str) -> Result<(), ClientError> {
+    // Reject "../" or "/.." path traversal patterns
+    if endpoint.contains("../") || endpoint.contains("/..") {
+        return Err(ClientError::Api(format!(
+            "endpoint contains path traversal: {endpoint}"
+        )));
+    }
+    Ok(())
 }
 
 /// Check rate limit headers and log warnings.
@@ -1320,16 +1361,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_429_returns_error() {
-        // Finding #7: 429 should not silently succeed
+    async fn test_http_429_retries_then_fails() {
+        // Finding #7: 429 should retry with backoff, then return error
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/repos/o/r"))
             .respond_with(
                 ResponseTemplate::new(429)
                     .set_body_string("rate limited")
-                    .insert_header("retry-after", "60")
+                    .insert_header("retry-after", "1") // Short for test speed
             )
+            .expect(1 + MAX_RETRIES as u64) // Initial + retries
             .mount(&server)
             .await;
 
@@ -1337,5 +1379,49 @@ mod tests {
         let result = client.api("/repos/o/r", &[]).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("429"));
+    }
+
+    #[tokio::test]
+    async fn test_http_429_recovers_on_retry() {
+        // Server returns 429 once, then succeeds
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .set_body_string("rate limited")
+                    .insert_header("retry-after", "1")
+            )
+            .up_to_n_times(1) // Only fail once
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"name": "r"}))
+            )
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = client.api("/repos/o/r", &[]).await.unwrap();
+        assert_eq!(result["name"], "r");
+    }
+
+    #[tokio::test]
+    async fn test_endpoint_validation_rejects_traversal() {
+        let client = GithubClient::mock(vec![]);
+        let result = client.api("/repos/../../admin/secrets", &[]).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("path traversal"));
+    }
+
+    #[tokio::test]
+    async fn test_endpoint_validation_allows_compare() {
+        // GitHub compare syntax uses "..." which must not be rejected
+        let client = GithubClient::mock(vec![json!({"status": "ahead"})]);
+        let result = client.api("/repos/o/r/compare/main...feat", &[]).await;
+        assert!(result.is_ok());
     }
 }

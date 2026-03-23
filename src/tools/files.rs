@@ -81,9 +81,14 @@ pub async fn delete(
     client.api(&endpoint, &args).await
 }
 
-/// Push multiple files to a repository atomically via the Git Data API.
+/// Push multiple files to a repository via the Git Data API.
 ///
-/// Creates a single commit containing all file changes. Uses:
+/// Creates a single commit containing all file changes.
+/// NOTE: This is NOT atomic — if a step fails mid-sequence, earlier objects
+/// (blobs, trees) remain as orphaned Git objects. The branch ref is only
+/// updated in the final step.
+///
+/// Uses:
 /// 1. GET ref → current commit SHA
 /// 2. GET commit → current tree SHA
 /// 3. POST blobs → blob SHAs for each file

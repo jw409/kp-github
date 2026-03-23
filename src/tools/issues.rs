@@ -301,16 +301,6 @@ fn update_args(
 }
 
 #[cfg(test)]
-fn extract_search_items_old(result: &Value) -> Option<Value> {
-    if let Value::Object(ref map) = result {
-        if let Some(items) = map.get("items") {
-            return Some(items.clone());
-        }
-    }
-    None
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
