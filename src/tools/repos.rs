@@ -12,23 +12,7 @@ pub async fn search(
     let url = format!("/search/repositories?q={}&per_page={per_page}", crate::util::urlencode(query));
     let result = client.api(&url, &[]).await?;
 
-    // Extract .items from search response
-    match result {
-        Value::Object(ref map) => {
-            if let Some(items) = map.get("items") {
-                if let Some(limit) = limit {
-                    if let Some(arr) = items.as_array() {
-                        let limited: Vec<Value> =
-                            arr.iter().take(limit as usize).cloned().collect();
-                        return Ok(Value::Array(limited));
-                    }
-                }
-                return Ok(items.clone());
-            }
-            Ok(result)
-        }
-        _ => Ok(result),
-    }
+    crate::tools::search_util::extract_search_items(&result, limit)
 }
 
 /// Get a single repository.
@@ -140,25 +124,6 @@ fn search_url(query: &str, per_page: u32) -> String {
     format!("/search/repositories?q={}&per_page={per_page}", crate::util::urlencode(query))
 }
 
-#[cfg(test)]
-fn extract_search_items(result: &Value, limit: Option<u32>) -> Value {
-    match result {
-        Value::Object(ref map) => {
-            if let Some(items) = map.get("items") {
-                if let Some(limit) = limit {
-                    if let Some(arr) = items.as_array() {
-                        let limited: Vec<Value> =
-                            arr.iter().take(limit as usize).cloned().collect();
-                        return Value::Array(limited);
-                    }
-                }
-                return items.clone();
-            }
-            result.clone()
-        }
-        _ => result.clone(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -197,48 +162,21 @@ mod tests {
         assert!(url.contains("per_page=10"));
     }
 
-    #[test]
-    fn test_extract_search_items_with_items() {
-        let result = json!({"total_count": 2, "items": [{"id": 1}, {"id": 2}]});
-        let items = extract_search_items(&result, None);
-        assert_eq!(items.as_array().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn test_extract_search_items_with_limit() {
-        let result = json!({"items": [{"id": 1}, {"id": 2}, {"id": 3}]});
-        let items = extract_search_items(&result, Some(2));
-        assert_eq!(items.as_array().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn test_extract_search_items_no_items() {
-        let result = json!({"data": []});
-        let items = extract_search_items(&result, None);
-        assert!(items.is_object()); // returns original
-    }
-
-    #[test]
-    fn test_extract_search_items_non_object() {
-        let result = json!([1, 2]);
-        let items = extract_search_items(&result, None);
-        assert!(items.is_array());
-    }
-
-    // --- Async tests with mock client ---
+    // search_util tests are in search_util.rs — only async integration tests here
 
     #[tokio::test]
     async fn test_search_repos() {
-        let client = GithubClient::mock(vec![json!({"items": [{"full_name": "a/b"}]})]);
+        let client = GithubClient::mock(vec![json!({"total_count": 1, "items": [{"full_name": "a/b"}]})]);
         let result = search(&client, "language:rust", Some(5)).await.unwrap();
-        assert!(result.is_array());
+        assert!(result["items"].is_array());
+        assert_eq!(result["total_count"], 1);
     }
 
     #[tokio::test]
     async fn test_search_repos_no_limit() {
-        let client = GithubClient::mock(vec![json!({"items": [{"id": 1}, {"id": 2}]})]);
+        let client = GithubClient::mock(vec![json!({"total_count": 2, "items": [{"id": 1}, {"id": 2}]})]);
         let result = search(&client, "stars:>100", None).await.unwrap();
-        assert_eq!(result.as_array().unwrap().len(), 2);
+        assert_eq!(result["items"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]

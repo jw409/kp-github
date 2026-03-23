@@ -210,9 +210,20 @@ fn stage2_flatten(map: &mut Map<String, Value>) {
         if encoding == "base64" {
             if let Some(Value::String(content)) = map.get("content") {
                 let cleaned: String = content.chars().filter(|c| !c.is_whitespace()).collect();
-                if let Ok(decoded) = base64_decode(&cleaned) {
-                    if let Ok(text) = String::from_utf8(decoded) {
-                        map.insert("content".to_string(), Value::String(text));
+                match base64_decode(&cleaned) {
+                    Ok(decoded) => match String::from_utf8(decoded) {
+                        Ok(text) => {
+                            map.insert("content".to_string(), Value::String(text));
+                        }
+                        Err(_) => {
+                            // Binary file — restore encoding indicator
+                            map.insert("encoding".to_string(), Value::String("binary".into()));
+                        }
+                    },
+                    Err(_) => {
+                        // Decode failed — restore encoding so caller knows content is base64
+                        map.insert("encoding".to_string(), Value::String("base64".into()));
+                        tracing::warn!("Failed to decode base64 content");
                     }
                 }
             }

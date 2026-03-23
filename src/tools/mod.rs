@@ -11,3 +11,4 @@ pub mod tags;
 pub mod teams;
 pub mod labels;
 pub mod actions;
+pub mod search_util;

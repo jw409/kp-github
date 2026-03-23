@@ -20,13 +20,7 @@ pub async fn search(
     );
     let result = client.api(&url, &[]).await?;
 
-    // Extract .items from search response
-    if let Value::Object(ref map) = result {
-        if let Some(items) = map.get("items") {
-            return Ok(items.clone());
-        }
-    }
-    Ok(result)
+    crate::tools::search_util::extract_search_items(&result, limit)
 }
 
 #[cfg(test)]
@@ -34,15 +28,6 @@ fn search_url(query: &str, per_page: u32) -> String {
     format!("/search/users?q={}&per_page={per_page}", crate::util::urlencode(query))
 }
 
-#[cfg(test)]
-fn extract_search_items(result: &Value) -> Option<Value> {
-    if let Value::Object(ref map) = result {
-        if let Some(items) = map.get("items") {
-            return Some(items.clone());
-        }
-    }
-    None
-}
 
 #[cfg(test)]
 mod tests {
@@ -59,14 +44,17 @@ mod tests {
     #[test]
     fn test_extract_search_items() {
         let result = json!({"total_count": 1, "items": [{"login": "alice"}]});
-        let items = extract_search_items(&result).unwrap();
-        assert_eq!(items[0]["login"], "alice");
+        let extracted = crate::tools::search_util::extract_search_items(&result, None).unwrap();
+        assert_eq!(extracted["items"][0]["login"], "alice");
+        assert_eq!(extracted["total_count"], 1);
     }
 
     #[test]
-    fn test_extract_search_items_none() {
+    fn test_extract_search_items_no_items_key() {
         let result = json!({"data": []});
-        assert!(extract_search_items(&result).is_none());
+        let extracted = crate::tools::search_util::extract_search_items(&result, None).unwrap();
+        // Returns the original object when no "items" key
+        assert!(extracted.is_object());
     }
 
     // --- Async tests with mock client ---
@@ -80,9 +68,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_users() {
-        let client = GithubClient::mock(vec![json!({"items": [{"login": "alice"}]})]);
+        let client = GithubClient::mock(vec![json!({"total_count": 1, "items": [{"login": "alice"}]})]);
         let result = search(&client, "location:sf", Some(10)).await.unwrap();
-        assert!(result.is_array());
+        assert!(result["items"].is_array());
+        assert_eq!(result["total_count"], 1);
     }
 
     #[tokio::test]

@@ -1,6 +1,16 @@
-use reqwest::header::{ACCEPT, AUTHORIZATION, LINK, USER_AGENT};
+use reqwest::header::{ACCEPT, AUTHORIZATION, LINK};
 use serde_json::Value;
+use std::time::Duration;
 use thiserror::Error;
+
+/// HTTP request timeout (connect + response).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Connection establishment timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Subprocess execution timeout.
+const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(60);
+/// Maximum number of pages to fetch before stopping (circuit breaker).
+const MAX_PAGES: usize = 50;
 
 #[derive(Error, Debug)]
 pub enum ClientError {
@@ -12,6 +22,8 @@ pub enum ClientError {
     Http(#[from] reqwest::Error),
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Timeout: {0}")]
+    Timeout(String),
 }
 
 enum Backend {
@@ -42,6 +54,8 @@ impl GithubClient {
 
         match reqwest::Client::builder()
             .user_agent("kp-github-mcp/0.1")
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
         {
             Ok(client) => {
@@ -98,26 +112,16 @@ impl GithubClient {
                 let resp = req
                     .header(AUTHORIZATION, format!("Bearer {token}"))
                     .header(ACCEPT, "application/vnd.github+json")
-                    .header(USER_AGENT, "kp-github-mcp/0.1")
                     .header("X-GitHub-Api-Version", "2022-11-28")
                     .send()
                     .await?;
+
+                check_rate_limit_and_retry(&resp);
 
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
                     return Err(ClientError::Api(format!("{status}: {body}")));
-                }
-
-                // Check rate limit headers
-                let remaining = resp.headers()
-                    .get("x-ratelimit-remaining")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u32>().ok());
-                if let Some(rem) = remaining {
-                    if rem < 100 {
-                        tracing::warn!("GitHub rate limit: {rem} requests remaining");
-                    }
                 }
 
                 let text = resp.text().await?;
@@ -154,33 +158,29 @@ impl GithubClient {
             Backend::Http { client, token } => {
                 let mut all_items: Vec<Value> = Vec::new();
                 let mut next_url = Some(format!("{}{url}", self.base_url));
+                let mut page_count = 0usize;
 
                 while let Some(current_url) = next_url.take() {
+                    page_count += 1;
+                    if page_count > MAX_PAGES {
+                        tracing::warn!("Pagination circuit breaker: stopped after {MAX_PAGES} pages");
+                        break;
+                    }
+
                     let resp = client
                         .get(&current_url)
                         .header(AUTHORIZATION, format!("Bearer {token}"))
                         .header(ACCEPT, "application/vnd.github+json")
-                        .header(USER_AGENT, "kp-github-mcp/0.1")
                         .header("X-GitHub-Api-Version", "2022-11-28")
                         .send()
                         .await?;
+
+                    check_rate_limit_and_retry(&resp);
 
                     if !resp.status().is_success() {
                         let status = resp.status();
                         let body = resp.text().await.unwrap_or_default();
                         return Err(ClientError::Api(format!("{status}: {body}")));
-                    }
-
-                    // Check rate limit
-                    let remaining = resp
-                        .headers()
-                        .get("x-ratelimit-remaining")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.parse::<u32>().ok());
-                    if let Some(rem) = remaining {
-                        if rem < 100 {
-                            tracing::warn!("GitHub rate limit: {rem} requests remaining");
-                        }
                     }
 
                     // Parse Link header for next page
@@ -195,7 +195,7 @@ impl GithubClient {
                     let page: Value = serde_json::from_str(&text)?;
 
                     if let Some(arr) = page.as_array() {
-                        all_items.extend(arr.iter().cloned());
+                        all_items.extend(arr.into_iter().cloned());
                     } else {
                         // Non-array response — return as-is (shouldn't happen for list endpoints)
                         return Ok(page);
@@ -224,11 +224,15 @@ impl GithubClient {
                     let mut cmd = tokio::process::Command::new("gh");
                     cmd.args(["api", &full_url]);
                     cmd.args(&args);
+                    cmd.stdin(std::process::Stdio::null());
 
-                    let output = cmd
-                        .output()
-                        .await
-                        .map_err(|e| ClientError::Cli(e.to_string()))?;
+                    let output = tokio::time::timeout(
+                        SUBPROCESS_TIMEOUT,
+                        cmd.output(),
+                    )
+                    .await
+                    .map_err(|_| ClientError::Timeout(format!("gh api pagination timed out after {SUBPROCESS_TIMEOUT:?}")))?
+                    .map_err(|e| ClientError::Cli(e.to_string()))?;
                     if !output.status.success() {
                         let stderr = String::from_utf8_lossy(&output.stderr);
                         return Err(ClientError::Api(stderr.to_string()));
@@ -319,7 +323,6 @@ impl GithubClient {
                 let resp = req
                     .header(AUTHORIZATION, format!("Bearer {token}"))
                     .header(ACCEPT, "application/vnd.github+json")
-                    .header(USER_AGENT, "kp-github-mcp/0.1")
                     .header("X-GitHub-Api-Version", "2022-11-28")
                     .json(body)
                     .send()
@@ -358,10 +361,13 @@ impl GithubClient {
                     drop(stdin);
                 }
 
-                let output = child
-                    .wait_with_output()
-                    .await
-                    .map_err(|e| ClientError::Cli(e.to_string()))?;
+                let output = tokio::time::timeout(
+                    SUBPROCESS_TIMEOUT,
+                    child.wait_with_output(),
+                )
+                .await
+                .map_err(|_| ClientError::Timeout(format!("gh api {endpoint} timed out after {SUBPROCESS_TIMEOUT:?}")))?
+                .map_err(|e| ClientError::Cli(e.to_string()))?;
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -391,25 +397,16 @@ impl GithubClient {
                     .get(&url)
                     .header(AUTHORIZATION, format!("Bearer {token}"))
                     .header(ACCEPT, accept)
-                    .header(USER_AGENT, "kp-github-mcp/0.1")
                     .header("X-GitHub-Api-Version", "2022-11-28")
                     .send()
                     .await?;
+
+                check_rate_limit_and_retry(&resp);
 
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
                     return Err(ClientError::Api(format!("{status}: {body}")));
-                }
-
-                let remaining = resp.headers()
-                    .get("x-ratelimit-remaining")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u32>().ok());
-                if let Some(rem) = remaining {
-                    if rem < 100 {
-                        tracing::warn!("GitHub rate limit: {rem} requests remaining");
-                    }
                 }
 
                 Ok(resp.text().await?)
@@ -424,11 +421,17 @@ impl GithubClient {
             }
             Backend::GhCli => {
                 let accept_header = format!("Accept:{accept}");
-                let output = tokio::process::Command::new("gh")
-                    .args(["api", endpoint, "--header", &accept_header])
-                    .output()
-                    .await
-                    .map_err(|e| ClientError::Cli(e.to_string()))?;
+                let mut cmd = tokio::process::Command::new("gh");
+                cmd.args(["api", endpoint, "--header", &accept_header]);
+                cmd.stdin(std::process::Stdio::null());
+
+                let output = tokio::time::timeout(
+                    SUBPROCESS_TIMEOUT,
+                    cmd.output(),
+                )
+                .await
+                .map_err(|_| ClientError::Timeout(format!("gh api {endpoint} timed out after {SUBPROCESS_TIMEOUT:?}")))?
+                .map_err(|e| ClientError::Cli(e.to_string()))?;
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -447,8 +450,16 @@ impl GithubClient {
         for arg in args {
             cmd.arg(arg);
         }
+        // Prevent gh from consuming MCP's stdin
+        cmd.stdin(std::process::Stdio::null());
 
-        let output = cmd.output().await.map_err(|e| ClientError::Cli(e.to_string()))?;
+        let output = tokio::time::timeout(
+            SUBPROCESS_TIMEOUT,
+            cmd.output(),
+        )
+        .await
+        .map_err(|_| ClientError::Timeout(format!("gh api {endpoint} timed out after {SUBPROCESS_TIMEOUT:?}")))?
+        .map_err(|e| ClientError::Cli(e.to_string()))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -460,6 +471,22 @@ impl GithubClient {
             return Ok(Value::Null);
         }
         Ok(serde_json::from_str(&stdout)?)
+    }
+}
+
+/// Check rate limit headers and log warnings.
+fn check_rate_limit_and_retry(resp: &reqwest::Response) {
+    let remaining = resp
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u32>().ok());
+    if let Some(rem) = remaining {
+        if rem < 10 {
+            tracing::error!("GitHub rate limit critical: {rem} requests remaining");
+        } else if rem < 100 {
+            tracing::warn!("GitHub rate limit low: {rem} requests remaining");
+        }
     }
 }
 
@@ -505,14 +532,32 @@ fn extract_fields<'a>(args: &[&'a str]) -> Vec<(&'a str, &'a str)> {
     fields
 }
 
+/// Parse a string value into the appropriate JSON type.
+/// "true"/"false" → Bool, integers → Number, everything else → String.
+fn parse_field_value(val: &str) -> Value {
+    match val {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" => Value::Null,
+        _ => {
+            if let Ok(n) = val.parse::<i64>() {
+                Value::Number(n.into())
+            } else {
+                Value::String(val.to_string())
+            }
+        }
+    }
+}
+
 /// Convert -f key=value pairs to JSON object.
 /// Handles array fields: "labels[]=bug" -> {"labels": ["bug"]}
+/// Handles typed values: "draft=true" -> {"draft": true}, "per_page=100" -> {"per_page": 100}
 fn fields_to_json(fields: &[(&str, &str)]) -> Value {
     let mut map = serde_json::Map::new();
 
     for &(key, val) in fields {
         if let Some(array_key) = key.strip_suffix("[]") {
-            // Array field
+            // Array field — array elements stay as strings (labels, assignees)
             let entry = map
                 .entry(array_key.to_string())
                 .or_insert_with(|| Value::Array(Vec::new()));
@@ -520,7 +565,7 @@ fn fields_to_json(fields: &[(&str, &str)]) -> Value {
                 arr.push(Value::String(val.to_string()));
             }
         } else {
-            map.insert(key.to_string(), Value::String(val.to_string()));
+            map.insert(key.to_string(), parse_field_value(val));
         }
     }
 
@@ -556,6 +601,8 @@ impl GithubClient {
     pub fn http_with_base_url(base_url: &str, token: &str) -> Self {
         let client = reqwest::Client::builder()
             .user_agent("kp-github-mcp/0.1")
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .expect("Failed to build test HTTP client");
         Self {
@@ -609,7 +656,8 @@ mod tests {
     fn test_fields_to_json_scalars() {
         let fields = vec![("title", "bug"), ("state", "open")];
         let result = fields_to_json(&fields);
-        assert_eq!(result, json!({"title": "bug", "state": "open"}));
+        assert_eq!(result["title"], "bug");
+        assert_eq!(result["state"], "open");
     }
 
     #[test]
@@ -1192,5 +1240,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["ref"], "refs/heads/main");
+    }
+
+    // ---- Regression tests for audit findings ----
+
+    #[test]
+    fn test_fields_to_json_boolean_values() {
+        // Finding #4: booleans must be JSON booleans, not strings
+        let fields = vec![("draft", "true"), ("private", "false")];
+        let result = fields_to_json(&fields);
+        assert_eq!(result["draft"], Value::Bool(true));
+        assert_eq!(result["private"], Value::Bool(false));
+    }
+
+    #[test]
+    fn test_fields_to_json_numeric_values() {
+        // Finding #4: numbers must be JSON numbers, not strings
+        let fields = vec![("per_page", "100"), ("number", "42")];
+        let result = fields_to_json(&fields);
+        assert_eq!(result["per_page"], json!(100));
+        assert_eq!(result["number"], json!(42));
+    }
+
+    #[test]
+    fn test_fields_to_json_null_value() {
+        let fields = vec![("field", "null")];
+        let result = fields_to_json(&fields);
+        assert!(result["field"].is_null());
+    }
+
+    #[test]
+    fn test_fields_to_json_string_not_coerced() {
+        // Strings that look like numbers but aren't should stay strings
+        let fields = vec![("title", "123abc"), ("body", "not-a-number")];
+        let result = fields_to_json(&fields);
+        assert_eq!(result["title"], "123abc");
+        assert_eq!(result["body"], "not-a-number");
+    }
+
+    #[test]
+    fn test_fields_to_json_array_elements_stay_strings() {
+        // Array elements should remain strings (labels, assignees are always strings)
+        let fields = vec![("labels[]", "true"), ("labels[]", "42")];
+        let result = fields_to_json(&fields);
+        let arr = result["labels"].as_array().unwrap();
+        assert!(arr[0].is_string());
+        assert!(arr[1].is_string());
+    }
+
+    #[test]
+    fn test_parse_field_value() {
+        assert_eq!(parse_field_value("true"), Value::Bool(true));
+        assert_eq!(parse_field_value("false"), Value::Bool(false));
+        assert_eq!(parse_field_value("null"), Value::Null);
+        assert_eq!(parse_field_value("42"), json!(42));
+        assert_eq!(parse_field_value("-1"), json!(-1));
+        assert_eq!(parse_field_value("hello"), json!("hello"));
+        assert_eq!(parse_field_value("3.14"), json!("3.14")); // floats stay strings (GitHub API uses ints)
+    }
+
+    #[tokio::test]
+    async fn test_http_timeout_on_slow_server() {
+        // Finding #1: HTTP requests must timeout, not hang forever
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"name": "r"}))
+                    .set_delay(Duration::from_millis(100))
+            )
+            .mount(&server)
+            .await;
+
+        // Fast response should succeed (within our 30s timeout)
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = client.api("/repos/o/r", &[]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_http_429_returns_error() {
+        // Finding #7: 429 should not silently succeed
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .set_body_string("rate limited")
+                    .insert_header("retry-after", "60")
+            )
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = client.api("/repos/o/r", &[]).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("429"));
     }
 }

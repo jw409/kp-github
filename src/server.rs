@@ -1506,11 +1506,13 @@ impl ServerHandler for KpGithubServer {
                     let text = if let Some(encoded) = result.get("content").and_then(|v| v.as_str()) {
                         let cleaned: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
                         use base64::Engine;
-                        base64::engine::general_purpose::STANDARD
-                            .decode(&cleaned)
-                            .ok()
-                            .and_then(|bytes| String::from_utf8(bytes).ok())
-                            .unwrap_or_else(|| serde_json::to_string_pretty(&result).unwrap_or_default())
+                        match base64::engine::general_purpose::STANDARD.decode(&cleaned) {
+                            Ok(bytes) => match String::from_utf8(bytes) {
+                                Ok(s) => s,
+                                Err(_) => "[binary content — cannot display as text]".to_string(),
+                            },
+                            Err(e) => format!("[base64 decode error: {e}]"),
+                        }
                     } else {
                         serde_json::to_string_pretty(&result).unwrap_or_default()
                     };

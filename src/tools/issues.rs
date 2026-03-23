@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use crate::github::client::{ClientError, GithubClient};
+use crate::tools::search_util::extract_search_items;
 
 /// List issues for a repository.
 pub async fn list(
@@ -30,23 +31,23 @@ pub async fn get(
 }
 
 /// Search issues using GitHub search syntax.
+/// Appends `type:issue` unless the query already contains a `type:` qualifier.
 pub async fn search(
     client: &GithubClient,
     query: &str,
     limit: Option<u32>,
 ) -> Result<Value, ClientError> {
-    let full_query = format!("{query} type:issue");
+    let full_query = if query.contains("type:") {
+        query.to_string()
+    } else {
+        format!("{query} type:issue")
+    };
     let per_page = limit.unwrap_or(30).min(100);
     let url = format!("/search/issues?q={}&per_page={per_page}", crate::util::urlencode(&full_query));
     let result = client.api(&url, &[]).await?;
 
-    // Extract .items from search response
-    if let Value::Object(ref map) = result {
-        if let Some(items) = map.get("items") {
-            return Ok(items.clone());
-        }
-    }
-    Ok(result)
+    // Extract .items from search response, preserving total_count
+    extract_search_items(&result, limit)
 }
 
 /// Create a new issue.
@@ -211,7 +212,11 @@ fn get_endpoint(owner: &str, repo: &str, number: u32) -> String {
 
 #[cfg(test)]
 fn search_url(query: &str, per_page: u32) -> String {
-    let full_query = format!("{query} type:issue");
+    let full_query = if query.contains("type:") {
+        query.to_string()
+    } else {
+        format!("{query} type:issue")
+    };
     format!("/search/issues?q={}&per_page={per_page}", crate::util::urlencode(&full_query))
 }
 
@@ -296,7 +301,7 @@ fn update_args(
 }
 
 #[cfg(test)]
-fn extract_search_items(result: &Value) -> Option<Value> {
+fn extract_search_items_old(result: &Value) -> Option<Value> {
     if let Value::Object(ref map) = result {
         if let Some(items) = map.get("items") {
             return Some(items.clone());
@@ -324,7 +329,8 @@ mod tests {
     fn test_search_url() {
         let url = search_url("is:open label:bug", 10);
         assert!(url.starts_with("/search/issues?q="));
-        assert!(url.contains("type:issue"));
+        // type:issue is URL-encoded
+        assert!(url.contains("type%3Aissue"));
         assert!(url.contains("per_page=10"));
     }
 
@@ -401,20 +407,24 @@ mod tests {
     #[test]
     fn test_extract_search_items_with_items() {
         let result = json!({"total_count": 2, "items": [{"id": 1}, {"id": 2}]});
-        let items = extract_search_items(&result).unwrap();
-        assert_eq!(items.as_array().unwrap().len(), 2);
+        let extracted = extract_search_items(&result, None).unwrap();
+        assert_eq!(extracted["items"].as_array().unwrap().len(), 2);
+        assert_eq!(extracted["total_count"], 2);
+        assert_eq!(extracted["truncated"], false);
     }
 
     #[test]
     fn test_extract_search_items_without_items() {
         let result = json!({"data": "something"});
-        assert!(extract_search_items(&result).is_none());
+        let extracted = extract_search_items(&result, None).unwrap();
+        assert_eq!(extracted["data"], "something");
     }
 
     #[test]
     fn test_extract_search_items_non_object() {
         let result = json!([1, 2, 3]);
-        assert!(extract_search_items(&result).is_none());
+        let extracted = extract_search_items(&result, None).unwrap();
+        assert!(extracted.is_array());
     }
 
     // --- Async tests with mock client ---
@@ -444,8 +454,16 @@ mod tests {
     async fn test_search_issues_with_items() {
         let client = GithubClient::mock(vec![json!({"items": [{"id": 1}], "total_count": 1})]);
         let result = search(&client, "is:open", Some(10)).await.unwrap();
-        assert!(result.is_array());
-        assert_eq!(result.as_array().unwrap().len(), 1);
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["total_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_issues_respects_existing_type_qualifier() {
+        // Finding #13: should not append type:issue when query already has type:
+        let client = GithubClient::mock(vec![json!({"items": [], "total_count": 0})]);
+        let result = search(&client, "type:pr author:jw", Some(10)).await.unwrap();
+        assert!(result["items"].is_array());
     }
 
     #[tokio::test]

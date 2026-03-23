@@ -207,7 +207,9 @@ pub async fn check_runs(
         .ok_or_else(|| ClientError::Api("missing head.sha in PR response".to_string()))?;
     let endpoint = format!("/repos/{owner}/{repo}/commits/{sha}/check-runs");
     let result = client.api(&endpoint, &[]).await?;
-    Ok(result["check_runs"].clone())
+    result.get("check_runs")
+        .cloned()
+        .ok_or_else(|| ClientError::Api("check_runs field missing from GitHub response".to_string()))
 }
 
 /// Get combined status for a PR's head commit.
@@ -248,23 +250,22 @@ pub async fn create_review(
 }
 
 /// Search pull requests using GitHub search syntax.
+/// Appends `type:pr` unless the query already contains a `type:` qualifier.
 pub async fn search(
     client: &GithubClient,
     query: &str,
     limit: Option<u32>,
 ) -> Result<Value, ClientError> {
-    let full_query = format!("{query} type:pr");
+    let full_query = if query.contains("type:") {
+        query.to_string()
+    } else {
+        format!("{query} type:pr")
+    };
     let per_page = limit.unwrap_or(30).min(100);
     let url = format!("/search/issues?q={}&per_page={per_page}", crate::util::urlencode(&full_query));
     let result = client.api(&url, &[]).await?;
 
-    // Extract .items from search response
-    if let Value::Object(ref map) = result {
-        if let Some(items) = map.get("items") {
-            return Ok(items.clone());
-        }
-    }
-    Ok(result)
+    crate::tools::search_util::extract_search_items(&result, limit)
 }
 
 /// Add a single review comment to a pull request.
@@ -427,7 +428,11 @@ fn update_branch_endpoint(owner: &str, repo: &str, number: u32) -> String {
 
 #[cfg(test)]
 fn search_url(query: &str, per_page: u32) -> String {
-    let full_query = format!("{query} type:pr");
+    let full_query = if query.contains("type:") {
+        query.to_string()
+    } else {
+        format!("{query} type:pr")
+    };
     format!("/search/issues?q={}&per_page={per_page}", crate::util::urlencode(&full_query))
 }
 
@@ -615,7 +620,7 @@ mod tests {
     #[test]
     fn test_search_url() {
         let url = search_url("author:alice", 20);
-        assert!(url.contains("type:pr"));
+        assert!(url.contains("type%3Apr"));
         assert!(url.contains("per_page=20"));
     }
 
@@ -873,9 +878,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_prs() {
-        let client = GithubClient::mock(vec![json!({"items": [{"id": 1}]})]);
+        let client = GithubClient::mock(vec![json!({"total_count": 1, "items": [{"id": 1}]})]);
         let result = search(&client, "author:alice", Some(5)).await.unwrap();
-        assert!(result.is_array());
+        assert!(result["items"].is_array());
+        assert_eq!(result["total_count"], 1);
     }
 
     #[tokio::test]
