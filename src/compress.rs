@@ -324,10 +324,13 @@ fn stage4_compact(map: &mut Map<String, Value>, config: &CompressConfig, now: Da
                         continue;
                     }
                 }
-                // Body truncation
+                // Body truncation — skip if caller explicitly requested this field
                 if (key == "body" || key == "description") && s.len() > config.max_body {
-                    map.insert(key.clone(), Value::String(truncate_str(s, config.max_body)));
-                    continue;
+                    let explicitly_requested = config.fields.as_ref().is_some_and(|f| f.iter().any(|fld| fld == &key));
+                    if !explicitly_requested {
+                        map.insert(key.clone(), Value::String(truncate_str(s, config.max_body)));
+                        continue;
+                    }
                 }
                 // URL compaction
                 if key == "html_url" {
@@ -513,6 +516,49 @@ mod tests {
         let result = compress(&input, &config, now());
         let body = result["body"].as_str().unwrap();
         assert!(body.len() <= 104); // 100 + "..."
+        assert!(body.ends_with("..."));
+    }
+
+    #[test]
+    fn test_body_not_truncated_when_explicitly_requested() {
+        let long_body = "x".repeat(1000);
+        let input = json!({ "body": long_body, "title": "test" });
+
+        let config = CompressConfig {
+            max_body: 100,
+            fields: Some(vec!["body".to_string(), "title".to_string()]),
+            ..CompressConfig::default()
+        };
+        let result = compress(&input, &config, now());
+        let body = result["body"].as_str().unwrap();
+        assert_eq!(body.len(), 1000, "body should not be truncated when explicitly requested via fields");
+        assert!(!body.ends_with("..."));
+    }
+
+    #[test]
+    fn test_description_not_truncated_when_explicitly_requested() {
+        let long_desc = "y".repeat(800);
+        let input = json!({ "description": long_desc, "name": "test" });
+
+        let config = CompressConfig {
+            max_body: 100,
+            fields: Some(vec!["description".to_string(), "name".to_string()]),
+            ..CompressConfig::default()
+        };
+        let result = compress(&input, &config, now());
+        let desc = result["description"].as_str().unwrap();
+        assert_eq!(desc.len(), 800);
+    }
+
+    #[test]
+    fn test_body_still_truncated_without_fields() {
+        // When no fields specified, truncation should still apply
+        let long_body = "x".repeat(1000);
+        let input = json!({ "body": long_body });
+
+        let config = CompressConfig { max_body: 100, ..CompressConfig::default() };
+        let result = compress(&input, &config, now());
+        let body = result["body"].as_str().unwrap();
         assert!(body.ends_with("..."));
     }
 
