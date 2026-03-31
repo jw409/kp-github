@@ -81,14 +81,14 @@ pub async fn delete(
     client.api(&endpoint, &args).await
 }
 
-/// Push multiple files to a repository via the Git Data API.
+/// Push multiple files to a repository in a single commit via the Git Data API.
 ///
-/// Creates a single commit containing all file changes.
-/// NOTE: This is NOT atomic — if a step fails mid-sequence, earlier objects
-/// (blobs, trees) remain as orphaned Git objects. The branch ref is only
-/// updated in the final step.
+/// **Not atomic**: uses a 6-step sequence. If any step after blob creation
+/// fails, orphaned Git objects remain (GitHub GCs them after ~90 days).
+/// The branch ref is only updated in the final step, so visible repo state
+/// stays consistent on failure — but the operation cannot be rolled back.
 ///
-/// Uses:
+/// Steps:
 /// 1. GET ref → current commit SHA
 /// 2. GET commit → current tree SHA
 /// 3. POST blobs → blob SHAs for each file
@@ -125,20 +125,25 @@ pub async fn push_files(
 
     // Step 1: Get current commit SHA from branch ref
     let ref_endpoint = format!("/repos/{owner}/{repo}/git/ref/heads/{branch}");
-    let ref_data = client.api(&ref_endpoint, &[]).await?;
+    let ref_data = client.api(&ref_endpoint, &[]).await
+        .map_err(|e| ClientError::Api(format!("push_files step 1/6 (get ref): {e}")))?;
     let commit_sha = ref_data["object"]["sha"]
         .as_str()
-        .ok_or_else(|| ClientError::Api("could not get commit SHA from ref".into()))?;
+        .ok_or_else(|| ClientError::Api("push_files step 1/6: could not get commit SHA from ref".into()))?;
 
     // Step 2: Get tree SHA from current commit
     let commit_endpoint = format!("/repos/{owner}/{repo}/git/commits/{commit_sha}");
-    let commit_data = client.api(&commit_endpoint, &[]).await?;
+    let commit_data = client.api(&commit_endpoint, &[]).await
+        .map_err(|e| ClientError::Api(format!("push_files step 2/6 (get commit): {e}")))?;
     let base_tree_sha = commit_data["tree"]["sha"]
         .as_str()
-        .ok_or_else(|| ClientError::Api("could not get tree SHA from commit".into()))?;
+        .ok_or_else(|| ClientError::Api("push_files step 2/6: could not get tree SHA from commit".into()))?;
 
     // Step 3: Create blobs for each file
+    // NOTE: if a later step fails, these blobs become orphaned objects.
+    // GitHub will GC them after ~90 days. No rollback is possible via the API.
     let mut tree_entries = Vec::new();
+    let mut created_blob_count: usize = 0;
     for file in &files {
         let file_path = file["path"].as_str().unwrap(); // validated above
         let content = file["content"].as_str().unwrap(); // validated above
@@ -148,11 +153,17 @@ pub async fn push_files(
             "content": content,
             "encoding": "base64"
         });
-        let blob_result = client.api_json(&blob_endpoint, "POST", &blob_body).await?;
+        let blob_result = client.api_json(&blob_endpoint, "POST", &blob_body).await
+            .map_err(|e| ClientError::Api(format!(
+                "push_files step 3/6 (create blob for '{file_path}', {created_blob_count} prior blobs orphaned): {e}"
+            )))?;
         let blob_sha = blob_result["sha"]
             .as_str()
-            .ok_or_else(|| ClientError::Api("could not get blob SHA".into()))?;
+            .ok_or_else(|| ClientError::Api(format!(
+                "push_files step 3/6: could not get blob SHA for '{file_path}'"
+            )))?;
 
+        created_blob_count += 1;
         tree_entries.push(serde_json::json!({
             "path": file_path,
             "mode": "100644",
@@ -167,10 +178,14 @@ pub async fn push_files(
         "base_tree": base_tree_sha,
         "tree": tree_entries
     });
-    let tree_result = client.api_json(&tree_endpoint, "POST", &tree_body).await?;
+    let tree_result = client.api_json(&tree_endpoint, "POST", &tree_body).await
+        .map_err(|e| ClientError::Api(format!(
+            "push_files step 4/6 (create tree, {} blobs orphaned): {e}",
+            created_blob_count
+        )))?;
     let new_tree_sha = tree_result["sha"]
         .as_str()
-        .ok_or_else(|| ClientError::Api("could not get new tree SHA".into()))?;
+        .ok_or_else(|| ClientError::Api("push_files step 4/6: could not get new tree SHA".into()))?;
 
     // Step 5: Create new commit
     let new_commit_endpoint = format!("/repos/{owner}/{repo}/git/commits");
@@ -181,10 +196,14 @@ pub async fn push_files(
     });
     let new_commit_result = client
         .api_json(&new_commit_endpoint, "POST", &new_commit_body)
-        .await?;
+        .await
+        .map_err(|e| ClientError::Api(format!(
+            "push_files step 5/6 (create commit, tree+{} blobs orphaned): {e}",
+            created_blob_count
+        )))?;
     let new_commit_sha = new_commit_result["sha"]
         .as_str()
-        .ok_or_else(|| ClientError::Api("could not get new commit SHA".into()))?;
+        .ok_or_else(|| ClientError::Api("push_files step 5/6: could not get new commit SHA".into()))?;
 
     // Step 6: Update branch ref to point to new commit
     let update_ref_endpoint = format!("/repos/{owner}/{repo}/git/refs/heads/{branch}");
@@ -193,7 +212,11 @@ pub async fn push_files(
     });
     client
         .api_json(&update_ref_endpoint, "PATCH", &update_ref_body)
-        .await?;
+        .await
+        .map_err(|e| ClientError::Api(format!(
+            "push_files step 6/6 (update ref, commit+tree+{} blobs orphaned): {e}",
+            created_blob_count
+        )))?;
 
     Ok(serde_json::json!({
         "files_pushed": files.len(),
@@ -329,7 +352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_push_files_atomic_single_file() {
+    async fn test_push_files_single_file() {
         // Git Data API flow: ref → commit → blob → tree → commit → update ref
         let client = GithubClient::mock(vec![
             json!({"object": {"sha": "commit111"}}),           // GET ref
@@ -346,7 +369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_push_files_atomic_multiple_files() {
+    async fn test_push_files_multiple_files() {
         // 2 files: ref → commit → blob1 → blob2 → tree → commit → update ref
         let client = GithubClient::mock(vec![
             json!({"object": {"sha": "commit222"}}),
@@ -401,5 +424,64 @@ mod tests {
         let result = push_files(&client, "o", "r", "nope", "push",
             r#"[{"path":"a.txt","content":"aGk="}]"#).await;
         assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("step 1/6"), "error should include step context: {err_msg}");
+    }
+
+    #[tokio::test]
+    async fn test_push_files_tree_creation_fails_reports_orphaned_blobs() {
+        use crate::github::client::ClientError;
+        // Steps 1-3 succeed, step 4 (tree creation) fails
+        let client = GithubClient::mock_results(vec![
+            Ok(json!({"object": {"sha": "commit_abc"}})),   // step 1: GET ref
+            Ok(json!({"tree": {"sha": "tree_abc"}})),        // step 2: GET commit
+            Ok(json!({"sha": "blob_abc"})),                  // step 3: POST blob
+            Err(ClientError::Api("422: tree creation failed".into())), // step 4: fails
+        ]);
+        let result = push_files(&client, "o", "r", "main", "push",
+            r#"[{"path":"a.txt","content":"aGk="}]"#).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("step 4/6"), "error should include step: {err_msg}");
+        assert!(err_msg.contains("orphaned"), "error should mention orphaned objects: {err_msg}");
+    }
+
+    #[tokio::test]
+    async fn test_push_files_commit_creation_fails_reports_tree_plus_blobs() {
+        use crate::github::client::ClientError;
+        // Steps 1-4 succeed, step 5 (commit creation) fails
+        let client = GithubClient::mock_results(vec![
+            Ok(json!({"object": {"sha": "commit_abc"}})),    // step 1: GET ref
+            Ok(json!({"tree": {"sha": "tree_abc"}})),         // step 2: GET commit
+            Ok(json!({"sha": "blob_abc"})),                   // step 3: POST blob
+            Ok(json!({"sha": "newtree_abc"})),                // step 4: POST tree
+            Err(ClientError::Api("500: commit creation failed".into())), // step 5: fails
+        ]);
+        let result = push_files(&client, "o", "r", "main", "push",
+            r#"[{"path":"a.txt","content":"aGk="}]"#).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("step 5/6"), "error should include step: {err_msg}");
+        assert!(err_msg.contains("tree+"), "error should mention tree orphaned: {err_msg}");
+    }
+
+    #[tokio::test]
+    async fn test_push_files_ref_update_fails_reports_full_orphan_chain() {
+        use crate::github::client::ClientError;
+        // Steps 1-5 succeed, step 6 (ref update) fails
+        let client = GithubClient::mock_results(vec![
+            Ok(json!({"object": {"sha": "commit_abc"}})),    // step 1
+            Ok(json!({"tree": {"sha": "tree_abc"}})),         // step 2
+            Ok(json!({"sha": "blob_abc"})),                   // step 3
+            Ok(json!({"sha": "newtree_abc"})),                // step 4
+            Ok(json!({"sha": "newcommit_abc"})),              // step 5
+            Err(ClientError::Api("409: ref update conflict".into())), // step 6 fails
+        ]);
+        let result = push_files(&client, "o", "r", "main", "push",
+            r#"[{"path":"a.txt","content":"aGk="}]"#).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("step 6/6"), "error should include step: {err_msg}");
+        assert!(err_msg.contains("commit+tree"), "error should mention commit+tree orphaned: {err_msg}");
     }
 }
