@@ -328,6 +328,7 @@ impl GithubClient {
                     "POST" => client.post(&url),
                     "PATCH" => client.patch(&url),
                     "PUT" => client.put(&url),
+                    "DELETE" => client.delete(&url),
                     _ => client.get(&url),
                 };
 

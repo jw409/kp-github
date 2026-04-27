@@ -1,6 +1,59 @@
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
 use crate::github::client::{ClientError, GithubClient};
+
+/// Override commit identity for create/update/delete/push_files.
+///
+/// Both `name` and `email` of a side (author or committer) must be set together;
+/// passing only one is a caller error and returns [`ClientError::Api`]. If both
+/// `author` and `committer` are `None` GitHub uses the OAuth user's identity,
+/// which historically caused commits to be attributed to the token owner rather
+/// than the intended bot/user.
+#[derive(Debug, Default, Clone)]
+pub struct CommitIdentity<'a> {
+    pub author_name: Option<&'a str>,
+    pub author_email: Option<&'a str>,
+    pub committer_name: Option<&'a str>,
+    pub committer_email: Option<&'a str>,
+}
+
+impl<'a> CommitIdentity<'a> {
+    /// Returns `(author_obj, committer_obj)` ready to inject into a request body.
+    ///
+    /// Each side is `Some(obj)` only when both name+email are provided; an
+    /// asymmetric pair (name without email or vice versa) is rejected as an
+    /// error rather than silently dropped.
+    fn resolve(&self) -> Result<(Option<Value>, Option<Value>), ClientError> {
+        let author = match (self.author_name, self.author_email) {
+            (Some(n), Some(e)) => Some(json!({ "name": n, "email": e })),
+            (None, None) => None,
+            _ => return Err(ClientError::Api(
+                "author requires both author_name and author_email (or omit both)".into(),
+            )),
+        };
+        let committer = match (self.committer_name, self.committer_email) {
+            (Some(n), Some(e)) => Some(json!({ "name": n, "email": e })),
+            (None, None) => None,
+            _ => return Err(ClientError::Api(
+                "committer requires both committer_name and committer_email (or omit both)".into(),
+            )),
+        };
+        Ok((author, committer))
+    }
+
+    /// Inject the resolved `author` / `committer` JSON objects into a body map
+    /// at the top level. No-op if both are unset.
+    fn apply(&self, body: &mut Map<String, Value>) -> Result<(), ClientError> {
+        let (author, committer) = self.resolve()?;
+        if let Some(a) = author {
+            body.insert("author".into(), a);
+        }
+        if let Some(c) = committer {
+            body.insert("committer".into(), c);
+        }
+        Ok(())
+    }
+}
 
 /// Get file or directory contents from a repository.
 ///
@@ -26,6 +79,9 @@ pub async fn get_contents(
 /// The `content` parameter **must** be base64-encoded by the caller,
 /// matching the GitHub API contract.
 /// If `sha` is provided, the file is updated (overwritten); otherwise it is created.
+///
+/// `identity` overrides the commit's author/committer; omit to fall back to the
+/// OAuth user.
 pub async fn create_or_update(
     client: &GithubClient,
     owner: &str,
@@ -35,29 +91,29 @@ pub async fn create_or_update(
     message: &str,
     branch: &str,
     sha: Option<&str>,
+    identity: &CommitIdentity<'_>,
 ) -> Result<Value, ClientError> {
     let encoded_path = crate::util::urlencode_path_multi(path);
     let endpoint = format!("/repos/{owner}/{repo}/contents/{encoded_path}");
 
-    let content_field = format!("content={content}");
-    let message_field = format!("message={message}");
-    let branch_field = format!("branch={branch}");
-
-    let mut args = vec!["-X", "PUT", "-f", &content_field, "-f", &message_field, "-f", &branch_field];
-
-    let sha_field;
+    let mut body = Map::new();
+    body.insert("message".into(), Value::String(message.into()));
+    body.insert("content".into(), Value::String(content.into()));
+    body.insert("branch".into(), Value::String(branch.into()));
     if let Some(s) = sha {
-        sha_field = format!("sha={s}");
-        args.push("-f");
-        args.push(&sha_field);
+        body.insert("sha".into(), Value::String(s.into()));
     }
+    identity.apply(&mut body)?;
 
-    client.api(&endpoint, &args).await
+    client.api_json(&endpoint, "PUT", &Value::Object(body)).await
 }
 
 /// Delete a file from a repository.
 ///
 /// Requires the blob SHA of the file being deleted.
+///
+/// `identity` overrides the commit's author/committer; omit to fall back to the
+/// OAuth user.
 pub async fn delete(
     client: &GithubClient,
     owner: &str,
@@ -66,22 +122,18 @@ pub async fn delete(
     message: &str,
     branch: &str,
     sha: &str,
+    identity: &CommitIdentity<'_>,
 ) -> Result<Value, ClientError> {
     let encoded_path = crate::util::urlencode_path_multi(path);
     let endpoint = format!("/repos/{owner}/{repo}/contents/{encoded_path}");
 
-    let message_field = format!("message={message}");
-    let branch_field = format!("branch={branch}");
-    let sha_field = format!("sha={sha}");
+    let mut body = Map::new();
+    body.insert("message".into(), Value::String(message.into()));
+    body.insert("branch".into(), Value::String(branch.into()));
+    body.insert("sha".into(), Value::String(sha.into()));
+    identity.apply(&mut body)?;
 
-    let args = vec![
-        "-X", "DELETE",
-        "-f", &message_field,
-        "-f", &branch_field,
-        "-f", &sha_field,
-    ];
-
-    client.api(&endpoint, &args).await
+    client.api_json(&endpoint, "DELETE", &Value::Object(body)).await
 }
 
 /// Push multiple files to a repository in a single commit via the Git Data API.
@@ -108,7 +160,11 @@ pub async fn push_files(
     branch: &str,
     message: &str,
     files_json: &str,
+    identity: &CommitIdentity<'_>,
 ) -> Result<Value, ClientError> {
+    // Resolve identity up-front so a malformed pair fails before we touch GitHub.
+    let (author_obj, committer_obj) = identity.resolve()?;
+
     let files: Vec<serde_json::Value> = serde_json::from_str(files_json)
         .map_err(|e| ClientError::Api(format!("invalid files_json: {e}")))?;
 
@@ -195,11 +251,17 @@ pub async fn push_files(
 
     // Step 5: Create new commit
     let new_commit_endpoint = format!("/repos/{owner}/{repo}/git/commits");
-    let new_commit_body = serde_json::json!({
-        "message": message,
-        "tree": new_tree_sha,
-        "parents": [commit_sha]
-    });
+    let mut new_commit_body_map = Map::new();
+    new_commit_body_map.insert("message".into(), Value::String(message.into()));
+    new_commit_body_map.insert("tree".into(), Value::String(new_tree_sha.into()));
+    new_commit_body_map.insert("parents".into(), json!([commit_sha]));
+    if let Some(ref a) = author_obj {
+        new_commit_body_map.insert("author".into(), a.clone());
+    }
+    if let Some(ref c) = committer_obj {
+        new_commit_body_map.insert("committer".into(), c.clone());
+    }
+    let new_commit_body = Value::Object(new_commit_body_map);
     let new_commit_result = client
         .api_json(&new_commit_endpoint, "POST", &new_commit_body)
         .await
@@ -341,21 +403,30 @@ mod tests {
     #[tokio::test]
     async fn test_create_or_update_fn() {
         let client = GithubClient::mock(vec![json!({"content": {"path": "f.txt"}})]);
-        let result = create_or_update(&client, "o", "r", "f.txt", "SGVsbG8=", "add", "main", None).await.unwrap();
+        let result = create_or_update(
+            &client, "o", "r", "f.txt", "SGVsbG8=", "add", "main", None,
+            &CommitIdentity::default(),
+        ).await.unwrap();
         assert!(result["content"].is_object());
     }
 
     #[tokio::test]
     async fn test_create_or_update_with_sha() {
         let client = GithubClient::mock(vec![json!({"content": {"path": "f.txt"}})]);
-        let result = create_or_update(&client, "o", "r", "f.txt", "data", "update", "main", Some("abc123")).await.unwrap();
+        let result = create_or_update(
+            &client, "o", "r", "f.txt", "data", "update", "main", Some("abc123"),
+            &CommitIdentity::default(),
+        ).await.unwrap();
         assert!(result["content"].is_object());
     }
 
     #[tokio::test]
     async fn test_delete_fn() {
         let client = GithubClient::mock(vec![json!({"commit": {"sha": "abc"}})]);
-        let result = delete(&client, "o", "r", "old.txt", "remove", "main", "sha123").await.unwrap();
+        let result = delete(
+            &client, "o", "r", "old.txt", "remove", "main", "sha123",
+            &CommitIdentity::default(),
+        ).await.unwrap();
         assert!(result["commit"].is_object());
     }
 
@@ -371,7 +442,7 @@ mod tests {
             json!({"ref": "refs/heads/main"}),                  // PATCH ref
         ]);
         let files_json = r#"[{"path":"a.txt","content":"aGk="}]"#;
-        let result = push_files(&client, "o", "r", "main", "push", files_json).await.unwrap();
+        let result = push_files(&client, "o", "r", "main", "push", files_json, &CommitIdentity::default()).await.unwrap();
         assert_eq!(result["files_pushed"], 1);
         assert_eq!(result["commit_sha"], "newcommit111");
     }
@@ -389,7 +460,7 @@ mod tests {
             json!({"ref": "refs/heads/main"}),
         ]);
         let files_json = r#"[{"path":"a.txt","content":"aGk="},{"path":"b.txt","content":"d29ybGQ="}]"#;
-        let result = push_files(&client, "o", "r", "main", "add files", files_json).await.unwrap();
+        let result = push_files(&client, "o", "r", "main", "add files", files_json, &CommitIdentity::default()).await.unwrap();
         assert_eq!(result["files_pushed"], 2);
         assert_eq!(result["commit_sha"], "newcommit222");
     }
@@ -397,28 +468,28 @@ mod tests {
     #[tokio::test]
     async fn test_push_files_invalid_json() {
         let client = GithubClient::mock(vec![]);
-        let result = push_files(&client, "o", "r", "main", "push", "not json").await;
+        let result = push_files(&client, "o", "r", "main", "push", "not json", &CommitIdentity::default()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_push_files_missing_path() {
         let client = GithubClient::mock(vec![]);
-        let result = push_files(&client, "o", "r", "main", "push", r#"[{"content":"aGk="}]"#).await;
+        let result = push_files(&client, "o", "r", "main", "push", r#"[{"content":"aGk="}]"#, &CommitIdentity::default()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_push_files_missing_content() {
         let client = GithubClient::mock(vec![]);
-        let result = push_files(&client, "o", "r", "main", "push", r#"[{"path":"a.txt"}]"#).await;
+        let result = push_files(&client, "o", "r", "main", "push", r#"[{"path":"a.txt"}]"#, &CommitIdentity::default()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_push_files_empty_array() {
         let client = GithubClient::mock(vec![]);
-        let result = push_files(&client, "o", "r", "main", "push", "[]").await;
+        let result = push_files(&client, "o", "r", "main", "push", "[]", &CommitIdentity::default()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }
@@ -430,7 +501,7 @@ mod tests {
             Err(ClientError::Api("404: branch not found".into())),
         ]);
         let result = push_files(&client, "o", "r", "nope", "push",
-            r#"[{"path":"a.txt","content":"aGk="}]"#).await;
+            r#"[{"path":"a.txt","content":"aGk="}]"#, &CommitIdentity::default()).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("step 1/6"), "error should include step context: {err_msg}");
@@ -447,7 +518,7 @@ mod tests {
             Err(ClientError::Api("422: tree creation failed".into())), // step 4: fails
         ]);
         let result = push_files(&client, "o", "r", "main", "push",
-            r#"[{"path":"a.txt","content":"aGk="}]"#).await;
+            r#"[{"path":"a.txt","content":"aGk="}]"#, &CommitIdentity::default()).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("step 4/6"), "error should include step: {err_msg}");
@@ -466,7 +537,7 @@ mod tests {
             Err(ClientError::Api("500: commit creation failed".into())), // step 5: fails
         ]);
         let result = push_files(&client, "o", "r", "main", "push",
-            r#"[{"path":"a.txt","content":"aGk="}]"#).await;
+            r#"[{"path":"a.txt","content":"aGk="}]"#, &CommitIdentity::default()).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("step 5/6"), "error should include step: {err_msg}");
@@ -535,6 +606,7 @@ mod tests {
             "feature/my fix",
             "msg",
             r#"[{"path":"a.txt","content":"aGk="}]"#,
+            &CommitIdentity::default(),
         )
         .await;
         // Server.drop() asserts the step-1 mock was hit exactly once.
@@ -553,10 +625,209 @@ mod tests {
             Err(ClientError::Api("409: ref update conflict".into())), // step 6 fails
         ]);
         let result = push_files(&client, "o", "r", "main", "push",
-            r#"[{"path":"a.txt","content":"aGk="}]"#).await;
+            r#"[{"path":"a.txt","content":"aGk="}]"#, &CommitIdentity::default()).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("step 6/6"), "error should include step: {err_msg}");
         assert!(err_msg.contains("commit+tree"), "error should mention commit+tree orphaned: {err_msg}");
+    }
+
+    // --- CommitIdentity tests ---
+
+    #[test]
+    fn test_commit_identity_default_resolves_to_none() {
+        let id = CommitIdentity::default();
+        let (a, c) = id.resolve().unwrap();
+        assert!(a.is_none());
+        assert!(c.is_none());
+    }
+
+    #[test]
+    fn test_commit_identity_full_pair_builds_objects() {
+        let id = CommitIdentity {
+            author_name: Some("jw"),
+            author_email: Some("jw@example.com"),
+            committer_name: Some("bot"),
+            committer_email: Some("bot@example.com"),
+        };
+        let (a, c) = id.resolve().unwrap();
+        assert_eq!(a, Some(json!({"name": "jw", "email": "jw@example.com"})));
+        assert_eq!(c, Some(json!({"name": "bot", "email": "bot@example.com"})));
+    }
+
+    #[test]
+    fn test_commit_identity_partial_pair_is_rejected() {
+        // name without email → error, not silent drop
+        let id = CommitIdentity { author_name: Some("jw"), ..Default::default() };
+        let err = id.resolve().unwrap_err().to_string();
+        assert!(err.contains("author_name") && err.contains("author_email"));
+
+        let id = CommitIdentity { committer_email: Some("bot@x"), ..Default::default() };
+        let err = id.resolve().unwrap_err().to_string();
+        assert!(err.contains("committer_name") && err.contains("committer_email"));
+    }
+
+    #[test]
+    fn test_commit_identity_apply_inserts_only_set_sides() {
+        // Author set, committer omitted → body has author only
+        let id = CommitIdentity {
+            author_name: Some("jw"),
+            author_email: Some("jw@x"),
+            ..Default::default()
+        };
+        let mut body = Map::new();
+        id.apply(&mut body).unwrap();
+        assert!(body.contains_key("author"));
+        assert!(!body.contains_key("committer"));
+    }
+
+    // --- Wire-body tests: prove author/committer reach the request body ---
+
+    #[tokio::test]
+    async fn test_create_or_update_wire_body_includes_author_and_committer() {
+        use wiremock::matchers::{body_json, method, path};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/repos/o/r/contents/f.txt"))
+            .and(body_json(json!({
+                "message": "add",
+                "content": "SGVsbG8=",
+                "branch": "main",
+                "author": {"name": "jw", "email": "jw@example.com"},
+                "committer": {"name": "bot", "email": "bot@example.com"}
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"content": {"path": "f.txt"}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let identity = CommitIdentity {
+            author_name: Some("jw"),
+            author_email: Some("jw@example.com"),
+            committer_name: Some("bot"),
+            committer_email: Some("bot@example.com"),
+        };
+        let result = create_or_update(
+            &client, "o", "r", "f.txt", "SGVsbG8=", "add", "main", None, &identity,
+        ).await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_create_or_update_wire_body_omits_identity_when_unset() {
+        // When identity is default (all None), the body must NOT contain author/committer keys —
+        // so GitHub falls back to the OAuth user as before.
+        use wiremock::matchers::{body_json, method, path};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/repos/o/r/contents/f.txt"))
+            .and(body_json(json!({
+                "message": "add",
+                "content": "SGVsbG8=",
+                "branch": "main"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"content": {"path": "f.txt"}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = create_or_update(
+            &client, "o", "r", "f.txt", "SGVsbG8=", "add", "main", None,
+            &CommitIdentity::default(),
+        ).await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_delete_wire_body_includes_author() {
+        use wiremock::matchers::{body_json, method, path};
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/repos/o/r/contents/old.txt"))
+            .and(body_json(json!({
+                "message": "rm",
+                "branch": "main",
+                "sha": "abc123",
+                "author": {"name": "jw", "email": "jw@x"}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"commit": {"sha": "z"}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let identity = CommitIdentity {
+            author_name: Some("jw"),
+            author_email: Some("jw@x"),
+            ..Default::default()
+        };
+        let result = delete(&client, "o", "r", "old.txt", "rm", "main", "abc123", &identity).await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_create_or_update_partial_pair_returns_error_before_request() {
+        // No mock mounted: if a request goes out, the test fails (server returns
+        // its default 404). The partial-pair check must short-circuit first.
+        let server = MockServer::start().await;
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let identity = CommitIdentity {
+            author_name: Some("jw"),  // email missing
+            ..Default::default()
+        };
+        let err = create_or_update(
+            &client, "o", "r", "f.txt", "SGVsbG8=", "add", "main", None, &identity,
+        ).await.unwrap_err().to_string();
+        assert!(err.contains("author_name") && err.contains("author_email"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_push_files_wire_body_step5_includes_author_and_committer() {
+        // Verify step 5 (POST /git/commits) carries the author/committer overrides.
+        use wiremock::matchers::{body_json, method, path};
+        let server = MockServer::start().await;
+
+        // Steps 1-4 succeed (we only inspect step 5's body).
+        Mock::given(method("GET")).and(path("/repos/o/r/git/ref/heads/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"object": {"sha": "C1"}})))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/repos/o/r/git/commits/C1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"tree": {"sha": "T1"}})))
+            .mount(&server).await;
+        Mock::given(method("POST")).and(path("/repos/o/r/git/blobs"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"sha": "B1"})))
+            .mount(&server).await;
+        Mock::given(method("POST")).and(path("/repos/o/r/git/trees"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"sha": "T2"})))
+            .mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/git/commits"))
+            .and(body_json(json!({
+                "message": "msg",
+                "tree": "T2",
+                "parents": ["C1"],
+                "author": {"name": "jw", "email": "jw@x"},
+                "committer": {"name": "bot", "email": "bot@x"}
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"sha": "C2"})))
+            .expect(1)
+            .mount(&server).await;
+        Mock::given(method("PATCH")).and(path("/repos/o/r/git/refs/heads/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ref": "refs/heads/main"})))
+            .mount(&server).await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let identity = CommitIdentity {
+            author_name: Some("jw"), author_email: Some("jw@x"),
+            committer_name: Some("bot"), committer_email: Some("bot@x"),
+        };
+        let result = push_files(
+            &client, "o", "r", "main", "msg",
+            r#"[{"path":"a.txt","content":"aGk="}]"#,
+            &identity,
+        ).await;
+        assert!(result.is_ok(), "{result:?}");
     }
 }

@@ -431,6 +431,20 @@ pub struct FileCreateOrUpdateParams {
     /// Blob SHA of existing file (required for updates, omit for new files)
     #[serde(default)]
     pub sha: Option<String>,
+    /// Override commit author name. Must be set together with `author_email`;
+    /// omit both to fall back to the OAuth user's identity.
+    #[serde(default)]
+    pub author_name: Option<String>,
+    /// Override commit author email. Pair with `author_name`.
+    #[serde(default)]
+    pub author_email: Option<String>,
+    /// Override commit committer name. Must be set together with `committer_email`;
+    /// omit both to fall back to the OAuth user's identity.
+    #[serde(default)]
+    pub committer_name: Option<String>,
+    /// Override commit committer email. Pair with `committer_name`.
+    #[serde(default)]
+    pub committer_email: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -447,6 +461,18 @@ pub struct FileDeleteParams {
     pub branch: String,
     /// Blob SHA of the file being deleted
     pub sha: String,
+    /// Override commit author name. Pair with `author_email`.
+    #[serde(default)]
+    pub author_name: Option<String>,
+    /// Override commit author email. Pair with `author_name`.
+    #[serde(default)]
+    pub author_email: Option<String>,
+    /// Override commit committer name. Pair with `committer_email`.
+    #[serde(default)]
+    pub committer_name: Option<String>,
+    /// Override commit committer email. Pair with `committer_name`.
+    #[serde(default)]
+    pub committer_email: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -660,6 +686,18 @@ pub struct FilePushParams {
     pub message: String,
     /// JSON string: array of {path, content} objects. Content should be base64-encoded.
     pub files_json: String,
+    /// Override commit author name. Pair with `author_email`.
+    #[serde(default)]
+    pub author_name: Option<String>,
+    /// Override commit author email. Pair with `author_name`.
+    #[serde(default)]
+    pub author_email: Option<String>,
+    /// Override commit committer name. Pair with `committer_email`.
+    #[serde(default)]
+    pub committer_name: Option<String>,
+    /// Override commit committer email. Pair with `committer_name`.
+    #[serde(default)]
+    pub committer_email: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1008,7 +1046,16 @@ impl KpGithubServer {
     /// Create or update a file in a repository (content must be base64-encoded)
     #[rmcp::tool(name = "github_files_create_or_update")]
     async fn github_files_create_or_update(&self, Parameters(p): Parameters<FileCreateOrUpdateParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::files::create_or_update(&self.client, &p.owner, &p.repo, &p.path, &p.content, &p.message, &p.branch, p.sha.as_deref()).await
+        let identity = tools::files::CommitIdentity {
+            author_name: p.author_name.as_deref(),
+            author_email: p.author_email.as_deref(),
+            committer_name: p.committer_name.as_deref(),
+            committer_email: p.committer_email.as_deref(),
+        };
+        let result = tools::files::create_or_update(
+            &self.client, &p.owner, &p.repo, &p.path, &p.content, &p.message, &p.branch,
+            p.sha.as_deref(), &identity,
+        ).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, None, None);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1017,7 +1064,15 @@ impl KpGithubServer {
     /// Delete a file from a repository
     #[rmcp::tool(name = "github_files_delete")]
     async fn github_files_delete(&self, Parameters(p): Parameters<FileDeleteParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::files::delete(&self.client, &p.owner, &p.repo, &p.path, &p.message, &p.branch, &p.sha).await
+        let identity = tools::files::CommitIdentity {
+            author_name: p.author_name.as_deref(),
+            author_email: p.author_email.as_deref(),
+            committer_name: p.committer_name.as_deref(),
+            committer_email: p.committer_email.as_deref(),
+        };
+        let result = tools::files::delete(
+            &self.client, &p.owner, &p.repo, &p.path, &p.message, &p.branch, &p.sha, &identity,
+        ).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, None, None);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1273,7 +1328,15 @@ impl KpGithubServer {
     /// Push multiple files to a repository (sequential create_or_update per file)
     #[rmcp::tool(name = "github_files_push")]
     async fn github_files_push(&self, Parameters(p): Parameters<FilePushParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::files::push_files(&self.client, &p.owner, &p.repo, &p.branch, &p.message, &p.files_json).await
+        let identity = tools::files::CommitIdentity {
+            author_name: p.author_name.as_deref(),
+            author_email: p.author_email.as_deref(),
+            committer_name: p.committer_name.as_deref(),
+            committer_email: p.committer_email.as_deref(),
+        };
+        let result = tools::files::push_files(
+            &self.client, &p.owner, &p.repo, &p.branch, &p.message, &p.files_json, &identity,
+        ).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, None, None);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -2919,6 +2982,8 @@ mod tests {
             owner: "o".into(), repo: "r".into(), path: "README.md".into(),
             content: "SGVsbG8=".into(), message: "add readme".into(),
             branch: "main".into(), sha: None,
+            author_name: None, author_email: None,
+            committer_name: None, committer_email: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("README.md"));
     }
@@ -2929,6 +2994,8 @@ mod tests {
         let result = server.github_files_delete(Parameters(FileDeleteParams {
             owner: "o".into(), repo: "r".into(), path: "old.txt".into(),
             message: "remove".into(), branch: "main".into(), sha: "def456".into(),
+            author_name: None, author_email: None,
+            committer_name: None, committer_email: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("deleted"));
     }
@@ -2948,6 +3015,8 @@ mod tests {
             owner: "o".into(), repo: "r".into(), branch: "main".into(),
             message: "push files".into(),
             files_json: r#"[{"path":"a.txt","content":"aGk="}]"#.into(),
+            author_name: None, author_email: None,
+            committer_name: None, committer_email: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("files_pushed"));
     }
