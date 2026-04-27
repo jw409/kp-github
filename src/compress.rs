@@ -1102,6 +1102,52 @@ mod tests {
         }
     }
 
+    proptest! {
+        // Path-segment encoders must NEVER produce a literal space (would
+        // break URL parsing) or `+` (form-encoding leaking into a path —
+        // the bug from kinderpowers#19). They must also never produce raw
+        // characters outside the URI-safe set.
+        #[test]
+        fn urlencode_path_emits_only_safe_bytes(s in "\\PC{0,200}") {
+            let out = crate::util::urlencode_path(&s);
+            for c in out.chars() {
+                let ok = matches!(c,
+                    'A'..='Z' | 'a'..='z' | '0'..='9'
+                    | '-' | '_' | '.' | '~' | '%'
+                );
+                prop_assert!(ok, "urlencode_path emitted unsafe char {c:?} in {out:?}");
+            }
+            prop_assert!(!out.contains(' '));
+            prop_assert!(!out.contains('+'));
+        }
+
+        #[test]
+        fn urlencode_path_multi_emits_only_safe_bytes(s in "\\PC{0,200}") {
+            let out = crate::util::urlencode_path_multi(&s);
+            for c in out.chars() {
+                let ok = matches!(c,
+                    'A'..='Z' | 'a'..='z' | '0'..='9'
+                    | '-' | '_' | '.' | '~' | '%' | '/'
+                );
+                prop_assert!(ok, "urlencode_path_multi emitted unsafe char {c:?} in {out:?}");
+            }
+            prop_assert!(!out.contains(' '));
+            prop_assert!(!out.contains('+'));
+        }
+
+        // urlencode_path_multi preserves slashes by design — every `/` in
+        // the input must survive (and no extra ones appear).
+        #[test]
+        fn urlencode_path_multi_preserves_slash_count(s in "\\PC{0,200}") {
+            let in_slashes = s.bytes().filter(|&b| b == b'/').count();
+            let out_slashes = crate::util::urlencode_path_multi(&s)
+                .bytes()
+                .filter(|&b| b == b'/')
+                .count();
+            prop_assert_eq!(in_slashes, out_slashes);
+        }
+    }
+
     // 4. Body truncation never panics on arbitrary UTF-8
     proptest! {
         #[test]

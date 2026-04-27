@@ -12,9 +12,10 @@ pub async fn get_contents(
     path: &str,
     git_ref: Option<&str>,
 ) -> Result<Value, ClientError> {
-    let mut endpoint = format!("/repos/{owner}/{repo}/contents/{path}");
+    let encoded_path = crate::util::urlencode_path_multi(path);
+    let mut endpoint = format!("/repos/{owner}/{repo}/contents/{encoded_path}");
     if let Some(r) = git_ref {
-        endpoint.push_str(&format!("?ref={r}"));
+        endpoint.push_str(&format!("?ref={}", crate::util::urlencode(r)));
     }
     client.api(&endpoint, &[]).await
 }
@@ -35,7 +36,8 @@ pub async fn create_or_update(
     branch: &str,
     sha: Option<&str>,
 ) -> Result<Value, ClientError> {
-    let endpoint = format!("/repos/{owner}/{repo}/contents/{path}");
+    let encoded_path = crate::util::urlencode_path_multi(path);
+    let endpoint = format!("/repos/{owner}/{repo}/contents/{encoded_path}");
 
     let content_field = format!("content={content}");
     let message_field = format!("message={message}");
@@ -65,7 +67,8 @@ pub async fn delete(
     branch: &str,
     sha: &str,
 ) -> Result<Value, ClientError> {
-    let endpoint = format!("/repos/{owner}/{repo}/contents/{path}");
+    let encoded_path = crate::util::urlencode_path_multi(path);
+    let endpoint = format!("/repos/{owner}/{repo}/contents/{encoded_path}");
 
     let message_field = format!("message={message}");
     let branch_field = format!("branch={branch}");
@@ -123,8 +126,11 @@ pub async fn push_files(
             .ok_or_else(|| ClientError::Api("each file must have a 'content' string".into()))?;
     }
 
-    // Step 1: Get current commit SHA from branch ref
-    let ref_endpoint = format!("/repos/{owner}/{repo}/git/ref/heads/{branch}");
+    // Step 1: Get current commit SHA from branch ref.
+    // Branch names can legitimately contain `/` (`feature/foo`) — preserve those
+    // but percent-encode anything else that would break the URL.
+    let encoded_branch = crate::util::urlencode_path_multi(branch);
+    let ref_endpoint = format!("/repos/{owner}/{repo}/git/ref/heads/{encoded_branch}");
     let ref_data = client.api(&ref_endpoint, &[]).await
         .map_err(|e| ClientError::Api(format!("push_files step 1/6 (get ref): {e}")))?;
     let commit_sha = ref_data["object"]["sha"]
@@ -206,7 +212,7 @@ pub async fn push_files(
         .ok_or_else(|| ClientError::Api("push_files step 5/6: could not get new commit SHA".into()))?;
 
     // Step 6: Update branch ref to point to new commit
-    let update_ref_endpoint = format!("/repos/{owner}/{repo}/git/refs/heads/{branch}");
+    let update_ref_endpoint = format!("/repos/{owner}/{repo}/git/refs/heads/{encoded_branch}");
     let update_ref_body = serde_json::json!({
         "sha": new_commit_sha
     });
@@ -226,16 +232,18 @@ pub async fn push_files(
 
 #[cfg(test)]
 fn get_contents_endpoint(owner: &str, repo: &str, path: &str, git_ref: Option<&str>) -> String {
-    let mut endpoint = format!("/repos/{owner}/{repo}/contents/{path}");
+    let encoded_path = crate::util::urlencode_path_multi(path);
+    let mut endpoint = format!("/repos/{owner}/{repo}/contents/{encoded_path}");
     if let Some(r) = git_ref {
-        endpoint.push_str(&format!("?ref={r}"));
+        endpoint.push_str(&format!("?ref={}", crate::util::urlencode(r)));
     }
     endpoint
 }
 
 #[cfg(test)]
 fn contents_endpoint(owner: &str, repo: &str, path: &str) -> String {
-    format!("/repos/{owner}/{repo}/contents/{path}")
+    let encoded_path = crate::util::urlencode_path_multi(path);
+    format!("/repos/{owner}/{repo}/contents/{encoded_path}")
 }
 
 #[cfg(test)]
@@ -463,6 +471,73 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("step 5/6"), "error should include step: {err_msg}");
         assert!(err_msg.contains("tree+"), "error should mention tree orphaned: {err_msg}");
+    }
+
+    // --- Wire-path encoding regression tests ---
+
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{method, path};
+
+    #[tokio::test]
+    async fn test_get_contents_path_with_space_is_percent_encoded() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/contents/src/foo%20bar.rs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "foo bar.rs"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = get_contents(&client, "o", "r", "src/foo bar.rs", None).await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_get_contents_preserves_path_separators() {
+        // Slashes inside `path` must NOT be encoded — they're real path segments.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/contents/a/b/c.txt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "c.txt"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = get_contents(&client, "o", "r", "a/b/c.txt", None).await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_push_files_branch_with_space_in_ref_endpoint() {
+        // Step 1 hits /git/ref/heads/{branch} — branch with space must be %20.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/git/ref/heads/feature/my%20fix"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"object": {"sha": "abc"}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // We only test step 1 reaches the right path; subsequent steps would
+        // need more mocks but are not what we're verifying here.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/git/commits/abc"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(""))
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let _ = push_files(
+            &client,
+            "o",
+            "r",
+            "feature/my fix",
+            "msg",
+            r#"[{"path":"a.txt","content":"aGk="}]"#,
+        )
+        .await;
+        // Server.drop() asserts the step-1 mock was hit exactly once.
     }
 
     #[tokio::test]

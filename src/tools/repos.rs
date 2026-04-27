@@ -69,7 +69,11 @@ pub async fn compare(
     base: &str,
     head: &str,
 ) -> Result<Value, ClientError> {
-    let endpoint = format!("/repos/{owner}/{repo}/compare/{base}...{head}");
+    // base/head can be SHAs, branches (`feature/foo`), or refspecs —
+    // preserve `/` but encode anything else that would break the URL.
+    let encoded_base = crate::util::urlencode_path_multi(base);
+    let encoded_head = crate::util::urlencode_path_multi(head);
+    let endpoint = format!("/repos/{owner}/{repo}/compare/{encoded_base}...{encoded_head}");
     client.api(&endpoint, &[]).await
 }
 
@@ -111,7 +115,9 @@ fn create_endpoint(org: Option<&str>) -> String {
 
 #[cfg(test)]
 fn compare_endpoint(owner: &str, repo: &str, base: &str, head: &str) -> String {
-    format!("/repos/{owner}/{repo}/compare/{base}...{head}")
+    let encoded_base = crate::util::urlencode_path_multi(base);
+    let encoded_head = crate::util::urlencode_path_multi(head);
+    format!("/repos/{owner}/{repo}/compare/{encoded_base}...{encoded_head}")
 }
 
 #[cfg(test)]
@@ -219,6 +225,40 @@ mod tests {
         let client = GithubClient::mock(vec![json!({"status": "ahead"})]);
         let result = compare(&client, "o", "r", "main", "feat").await.unwrap();
         assert_eq!(result["status"], "ahead");
+    }
+
+    #[test]
+    fn test_compare_endpoint_with_slash_in_ref() {
+        // Branch refs like `feature/foo` must keep their `/` literal,
+        // otherwise GitHub can't resolve them.
+        let ep = compare_endpoint("o", "r", "main", "feature/my-fix");
+        assert_eq!(ep, "/repos/o/r/compare/main...feature/my-fix");
+    }
+
+    #[test]
+    fn test_compare_endpoint_with_caret_and_tilde() {
+        // git-style ancestry ops (`HEAD^`, `main~3`): `~` is unreserved (passes
+        // through), `^` is reserved (must be percent-encoded).
+        let ep = compare_endpoint("o", "r", "main~3", "HEAD^");
+        assert_eq!(ep, "/repos/o/r/compare/main~3...HEAD%5E");
+    }
+
+    #[tokio::test]
+    async fn test_compare_wire_path_with_slash_in_branch() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/compare/main...feature/my-fix"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "ahead"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = compare(&client, "o", "r", "main", "feature/my-fix").await;
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]

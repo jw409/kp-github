@@ -9,7 +9,7 @@ pub async fn get(
     repo: &str,
     name: &str,
 ) -> Result<Value, ClientError> {
-    let encoded = crate::util::urlencode(name);
+    let encoded = crate::util::urlencode_path(name);
     let endpoint = format!("/repos/{owner}/{repo}/labels/{encoded}");
     client.api(&endpoint, &[]).await
 }
@@ -63,7 +63,7 @@ pub async fn update(
     color: Option<&str>,
     description: Option<&str>,
 ) -> Result<Value, ClientError> {
-    let encoded = crate::util::urlencode(name);
+    let encoded = crate::util::urlencode_path(name);
     let endpoint = format!("/repos/{owner}/{repo}/labels/{encoded}");
     let mut args: Vec<&str> = vec!["-X", "PATCH"];
 
@@ -95,15 +95,25 @@ pub async fn delete(
     repo: &str,
     name: &str,
 ) -> Result<Value, ClientError> {
-    let encoded = crate::util::urlencode(name);
+    let encoded = crate::util::urlencode_path(name);
     let endpoint = format!("/repos/{owner}/{repo}/labels/{encoded}");
     client.api(&endpoint, &["-X", "DELETE"]).await
 }
 
 #[cfg(test)]
 fn get_endpoint(owner: &str, repo: &str, name: &str) -> String {
-    let encoded = crate::util::urlencode(name);
+    let encoded = crate::util::urlencode_path(name);
     format!("/repos/{owner}/{repo}/labels/{encoded}")
+}
+
+#[cfg(test)]
+fn update_endpoint(owner: &str, repo: &str, name: &str) -> String {
+    get_endpoint(owner, repo, name)
+}
+
+#[cfg(test)]
+fn delete_endpoint(owner: &str, repo: &str, name: &str) -> String {
+    get_endpoint(owner, repo, name)
 }
 
 #[cfg(test)]
@@ -158,8 +168,45 @@ mod tests {
 
     #[test]
     fn test_get_endpoint_with_spaces() {
+        // Path segments must use %20 for space, NOT form-style `+`.
+        // GitHub treats `+` as a literal character in a path, so a label
+        // named "help wanted" sent as "help+wanted" returns 404.
         let ep = get_endpoint("o", "r", "help wanted");
-        assert!(ep.contains("help+wanted"));
+        assert_eq!(ep, "/repos/o/r/labels/help%20wanted");
+        assert!(!ep.contains('+'), "must not use form-style + for space: {ep}");
+    }
+
+    #[test]
+    fn test_get_endpoint_issue_19_regression() {
+        // Exact label from kinderpowers#19: GET/PATCH/DELETE on these all 404'd
+        // because the name was form-encoded into the path.
+        let ep = get_endpoint("Meshlyai", "meshly-backend", "priority: P0");
+        assert_eq!(ep, "/repos/Meshlyai/meshly-backend/labels/priority%3A%20P0");
+    }
+
+    #[test]
+    fn test_update_and_delete_endpoints_match_get() {
+        // All three label-name path tools must encode identically — the bug
+        // from issue #19 affected get/update/delete the same way.
+        let name = "priority: P0";
+        assert_eq!(get_endpoint("o", "r", name), update_endpoint("o", "r", name));
+        assert_eq!(get_endpoint("o", "r", name), delete_endpoint("o", "r", name));
+    }
+
+    #[test]
+    fn test_label_endpoint_unicode() {
+        let ep = get_endpoint("o", "r", "重要");
+        // Each Chinese codepoint is 3 UTF-8 bytes → 9 chars %XX%XX%XX each
+        assert_eq!(ep, "/repos/o/r/labels/%E9%87%8D%E8%A6%81");
+    }
+
+    #[test]
+    fn test_label_endpoint_slash_does_not_escape_segment() {
+        // A label name with `/` must stay inside the labels segment —
+        // otherwise it'd target a different endpoint entirely.
+        let ep = get_endpoint("o", "r", "kind/bug");
+        assert!(ep.contains("kind%2Fbug"), "/ must be encoded: {ep}");
+        assert!(!ep.ends_with("kind/bug"));
     }
 
     #[test]
@@ -243,5 +290,97 @@ mod tests {
         let client = GithubClient::mock(vec![json!(null)]);
         let result = delete(&client, "o", "r", "stale").await.unwrap();
         assert!(result.is_null());
+    }
+
+    // --- Wire-path regression tests (issue #19) ---
+    //
+    // Mock-client tests above only check the response, not the URL.
+    // These tests stand up a local HTTP server, run the real client
+    // against it, and assert the actual path it requests — which is
+    // what GitHub sees and what the bug was about.
+
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{method, path};
+
+    #[tokio::test]
+    async fn test_get_label_with_space_hits_percent_20_path() {
+        // Issue #19: "priority: P0" GET must land on /labels/priority%3A%20P0
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/Meshlyai/meshly-backend/labels/priority%3A%20P0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "priority: P0"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = get(&client, "Meshlyai", "meshly-backend", "priority: P0").await;
+        assert!(result.is_ok(), "request must reach the percent-encoded path: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_update_label_with_space_hits_percent_20_path() {
+        // Issue #19 exact repro: PATCH /labels/priority%3A%20P0 with new_name body.
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/Meshlyai/meshly-backend/labels/priority%3A%20P0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "priority:P0"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = update(
+            &client,
+            "Meshlyai",
+            "meshly-backend",
+            "priority: P0",
+            Some("priority:P0"),
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "PATCH must reach the percent-encoded path: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_delete_label_with_space_hits_percent_20_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/repos/o/r/labels/help%20wanted"))
+            .respond_with(ResponseTemplate::new(204).set_body_string(""))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = delete(&client, "o", "r", "help wanted").await;
+        assert!(result.is_ok(), "DELETE must reach the percent-encoded path: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_label_with_form_plus_path_does_not_match() {
+        // Negative test: prove the OLD (buggy) form-encoded path no longer matches.
+        // If we ever regress to `+` for space, this test fails because the
+        // wire path will hit the *only* mounted mock (the buggy one) and the
+        // `expect(0)` assertion on the correct path will fail.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/labels/help%20wanted"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "help wanted"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Mount a mock for the *wrong* path and assert it's never hit.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/labels/help+wanted"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let _ = get(&client, "o", "r", "help wanted").await.unwrap();
+        // Drop server → wiremock asserts expectations.
     }
 }

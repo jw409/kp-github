@@ -20,7 +20,8 @@ pub async fn get_by_tag(
     repo: &str,
     tag: &str,
 ) -> Result<Value, ClientError> {
-    let endpoint = format!("/repos/{owner}/{repo}/releases/tags/{tag}");
+    let encoded_tag = crate::util::urlencode_path_multi(tag);
+    let endpoint = format!("/repos/{owner}/{repo}/releases/tags/{encoded_tag}");
     client.api(&endpoint, &[]).await
 }
 
@@ -83,7 +84,8 @@ fn list_endpoint(owner: &str, repo: &str) -> String {
 
 #[cfg(test)]
 fn get_by_tag_endpoint(owner: &str, repo: &str, tag: &str) -> String {
-    format!("/repos/{owner}/{repo}/releases/tags/{tag}")
+    let encoded_tag = crate::util::urlencode_path_multi(tag);
+    format!("/repos/{owner}/{repo}/releases/tags/{encoded_tag}")
 }
 
 #[cfg(test)]
@@ -129,6 +131,13 @@ mod tests {
     #[test]
     fn test_get_by_tag_endpoint() {
         assert_eq!(get_by_tag_endpoint("o", "r", "v1.0"), "/repos/o/r/releases/tags/v1.0");
+    }
+
+    #[test]
+    fn test_get_by_tag_endpoint_encodes_special_chars() {
+        let ep = get_by_tag_endpoint("o", "r", "v1.0 beta");
+        assert_eq!(ep, "/repos/o/r/releases/tags/v1.0%20beta");
+        assert!(!ep.contains('+'));
     }
 
     #[test]

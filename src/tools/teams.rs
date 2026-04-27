@@ -13,13 +13,17 @@ pub async fn members(
     org: &str,
     team_slug: &str,
 ) -> Result<Value, ClientError> {
-    let endpoint = format!("/orgs/{org}/teams/{team_slug}/members");
+    // GitHub team slugs are normalized to a-z0-9-, but defense in depth:
+    // if a caller passes a display name by mistake, encode rather than 404.
+    let encoded_slug = crate::util::urlencode_path(team_slug);
+    let endpoint = format!("/orgs/{org}/teams/{encoded_slug}/members");
     client.api(&endpoint, &[]).await
 }
 
 #[cfg(test)]
 fn members_endpoint(org: &str, team_slug: &str) -> String {
-    format!("/orgs/{org}/teams/{team_slug}/members")
+    let encoded_slug = crate::util::urlencode_path(team_slug);
+    format!("/orgs/{org}/teams/{encoded_slug}/members")
 }
 
 #[cfg(test)]

@@ -20,7 +20,8 @@ pub async fn get(
     repo: &str,
     tag: &str,
 ) -> Result<Value, ClientError> {
-    let endpoint = format!("/repos/{owner}/{repo}/git/ref/tags/{tag}");
+    let encoded_tag = crate::util::urlencode_path_multi(tag);
+    let endpoint = format!("/repos/{owner}/{repo}/git/ref/tags/{encoded_tag}");
     client.api(&endpoint, &[]).await
 }
 
@@ -31,7 +32,8 @@ fn list_endpoint(owner: &str, repo: &str) -> String {
 
 #[cfg(test)]
 fn get_endpoint(owner: &str, repo: &str, tag: &str) -> String {
-    format!("/repos/{owner}/{repo}/git/ref/tags/{tag}")
+    let encoded_tag = crate::util::urlencode_path_multi(tag);
+    format!("/repos/{owner}/{repo}/git/ref/tags/{encoded_tag}")
 }
 
 #[cfg(test)]
@@ -47,6 +49,21 @@ mod tests {
     #[test]
     fn test_get_endpoint() {
         assert_eq!(get_endpoint("o", "r", "v1.0.0"), "/repos/o/r/git/ref/tags/v1.0.0");
+    }
+
+    #[test]
+    fn test_get_endpoint_encodes_special_chars() {
+        // Tag names theoretically permit characters that need encoding.
+        let ep = get_endpoint("o", "r", "release 1.0");
+        assert_eq!(ep, "/repos/o/r/git/ref/tags/release%201.0");
+        assert!(!ep.contains('+'));
+    }
+
+    #[test]
+    fn test_get_endpoint_preserves_slashes_in_tag() {
+        // Hierarchical tags (`releases/2026.04`) are valid in git.
+        let ep = get_endpoint("o", "r", "releases/2026.04");
+        assert_eq!(ep, "/repos/o/r/git/ref/tags/releases/2026.04");
     }
 
     // --- Async tests with mock client ---
