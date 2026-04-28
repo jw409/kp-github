@@ -311,6 +311,33 @@ pub struct IssueNumberFieldsParams {
     pub repo: String,
     /// Issue number
     pub number: u32,
+    /// Maximum number of results (default 30, server cap 5000)
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Fields to include in output
+    #[serde(default)]
+    pub fields: Option<Vec<String>>,
+    /// Output format: json, table, text
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PrFilesParams {
+    /// Repository owner
+    pub owner: String,
+    /// Repository name
+    pub repo: String,
+    /// PR number
+    pub number: u32,
+    /// Maximum number of files returned (default 30). Use a higher value
+    /// (e.g. 300) to scan large PRs.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Include the inline `patch` diff per file. Default false because
+    /// patches dominate response size; use `prs_diff` for full unified diff.
+    #[serde(default)]
+    pub include_patches: bool,
     /// Fields to include in output
     #[serde(default)]
     pub fields: Option<Vec<String>>,
@@ -935,8 +962,8 @@ impl KpGithubServer {
 
     /// Get files changed in a pull request
     #[rmcp::tool(name = "github_prs_files")]
-    async fn github_prs_files(&self, Parameters(p): Parameters<PrGetParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::prs::files(&self.client, &p.owner, &p.repo, p.number).await
+    async fn github_prs_files(&self, Parameters(p): Parameters<PrFilesParams>) -> Result<CallToolResult, McpError> {
+        let result = tools::prs::files(&self.client, &p.owner, &p.repo, p.number, p.limit, p.include_patches).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -972,7 +999,7 @@ impl KpGithubServer {
     /// Get reviews on a pull request
     #[rmcp::tool(name = "github_prs_reviews")]
     async fn github_prs_reviews(&self, Parameters(p): Parameters<IssueNumberFieldsParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::prs::reviews(&self.client, &p.owner, &p.repo, p.number).await
+        let result = tools::prs::reviews(&self.client, &p.owner, &p.repo, p.number, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -981,7 +1008,7 @@ impl KpGithubServer {
     /// Get review comments (threaded) on a pull request
     #[rmcp::tool(name = "github_prs_review_comments")]
     async fn github_prs_review_comments(&self, Parameters(p): Parameters<IssueNumberFieldsParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::prs::review_comments(&self.client, &p.owner, &p.repo, p.number).await
+        let result = tools::prs::review_comments(&self.client, &p.owner, &p.repo, p.number, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -990,7 +1017,7 @@ impl KpGithubServer {
     /// Get comments on a pull request (non-review comments)
     #[rmcp::tool(name = "github_prs_comments")]
     async fn github_prs_comments(&self, Parameters(p): Parameters<IssueNumberFieldsParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::prs::comments(&self.client, &p.owner, &p.repo, p.number).await
+        let result = tools::prs::comments(&self.client, &p.owner, &p.repo, p.number, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -2730,7 +2757,7 @@ mod tests {
         let server = mock_server(vec![json!([{"name": "bug"}])]);
         let result = server.github_issues_labels(Parameters(IssueNumberFieldsParams {
             owner: "o".into(), repo: "r".into(), number: 1,
-            fields: None, format: None,
+            limit: None, fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("bug"));
     }
@@ -2790,11 +2817,41 @@ mod tests {
     #[tokio::test]
     async fn test_tool_prs_files() {
         let server = mock_server(vec![json!([{"filename": "src/lib.rs", "changes": 5}])]);
-        let result = server.github_prs_files(Parameters(PrGetParams {
+        let result = server.github_prs_files(Parameters(PrFilesParams {
             owner: "o".into(), repo: "r".into(), number: 1,
+            limit: None, include_patches: false,
             fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("lib.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_prs_files_strips_patches_by_default() {
+        let server = mock_server(vec![json!([
+            {"filename": "src/lib.rs", "patch": "@@ -1 +1 @@\n-x\n+y"},
+        ])]);
+        let result = server.github_prs_files(Parameters(PrFilesParams {
+            owner: "o".into(), repo: "r".into(), number: 1,
+            limit: None, include_patches: false,
+            fields: None, format: None,
+        })).await.unwrap();
+        let text = ok_text(&result);
+        assert!(text.contains("lib.rs"));
+        assert!(!text.contains("@@ -1 +1 @@"), "patch must be stripped by default; got: {text}");
+    }
+
+    #[tokio::test]
+    async fn test_tool_prs_files_keeps_patches_on_request() {
+        let server = mock_server(vec![json!([
+            {"filename": "src/lib.rs", "patch": "@@ -1 +1 @@\n-x\n+y"},
+        ])]);
+        let result = server.github_prs_files(Parameters(PrFilesParams {
+            owner: "o".into(), repo: "r".into(), number: 1,
+            limit: None, include_patches: true,
+            fields: None, format: None,
+        })).await.unwrap();
+        let text = ok_text(&result);
+        assert!(text.contains("@@ -1 +1 @@"), "patch must be retained when include_patches=true; got: {text}");
     }
 
     #[tokio::test]
@@ -2836,7 +2893,7 @@ mod tests {
         let server = mock_server(vec![json!([{"id": 1, "state": "APPROVED"}])]);
         let result = server.github_prs_reviews(Parameters(IssueNumberFieldsParams {
             owner: "o".into(), repo: "r".into(), number: 1,
-            fields: None, format: None,
+            limit: None, fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("APPROVED"));
     }
@@ -2846,7 +2903,7 @@ mod tests {
         let server = mock_server(vec![json!([{"id": 1, "body": "nitpick"}])]);
         let result = server.github_prs_review_comments(Parameters(IssueNumberFieldsParams {
             owner: "o".into(), repo: "r".into(), number: 1,
-            fields: None, format: None,
+            limit: None, fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("nitpick"));
     }
@@ -2856,7 +2913,7 @@ mod tests {
         let server = mock_server(vec![json!([{"id": 1, "body": "general comment"}])]);
         let result = server.github_prs_comments(Parameters(IssueNumberFieldsParams {
             owner: "o".into(), repo: "r".into(), number: 1,
-            fields: None, format: None,
+            limit: None, fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("general comment"));
     }
@@ -2870,7 +2927,7 @@ mod tests {
         ]);
         let result = server.github_prs_checks(Parameters(IssueNumberFieldsParams {
             owner: "o".into(), repo: "r".into(), number: 1,
-            fields: None, format: None,
+            limit: None, fields: None, format: None,
         })).await.unwrap();
         let text = ok_text(&result);
         assert!(text.contains("ci") || text.contains("success"));
@@ -2885,7 +2942,7 @@ mod tests {
         ]);
         let result = server.github_prs_status(Parameters(IssueNumberFieldsParams {
             owner: "o".into(), repo: "r".into(), number: 1,
-            fields: None, format: None,
+            limit: None, fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("success"));
     }

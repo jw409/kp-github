@@ -41,14 +41,32 @@ pub async fn diff(
 }
 
 /// List files changed in a pull request.
+///
+/// `limit` caps total files returned (paginates if > 100). `include_patches`
+/// retains the inline `patch` diff per file; default false because patches
+/// dominate response size and routinely blow MCP token budgets on large PRs
+/// (a 200-file PR returns megabytes of diffs). Callers needing diffs should
+/// opt in or use `prs::diff` for the unified diff.
 pub async fn files(
     client: &GithubClient,
     owner: &str,
     repo: &str,
     number: u32,
+    limit: Option<u32>,
+    include_patches: bool,
 ) -> Result<Value, ClientError> {
     let endpoint = format!("/repos/{owner}/{repo}/pulls/{number}/files");
-    client.api(&endpoint, &[]).await
+    let mut result = client.api_list(&endpoint, &[], limit).await?;
+    if !include_patches {
+        if let Some(arr) = result.as_array_mut() {
+            for item in arr.iter_mut() {
+                if let Some(obj) = item.as_object_mut() {
+                    obj.remove("patch");
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Create a new pull request.
@@ -166,9 +184,10 @@ pub async fn reviews(
     owner: &str,
     repo: &str,
     number: u32,
+    limit: Option<u32>,
 ) -> Result<Value, ClientError> {
     let endpoint = format!("/repos/{owner}/{repo}/pulls/{number}/reviews");
-    client.api(&endpoint, &[]).await
+    client.api_list(&endpoint, &[], limit).await
 }
 
 /// Get review comments (threaded) on a pull request.
@@ -177,9 +196,10 @@ pub async fn review_comments(
     owner: &str,
     repo: &str,
     number: u32,
+    limit: Option<u32>,
 ) -> Result<Value, ClientError> {
     let endpoint = format!("/repos/{owner}/{repo}/pulls/{number}/comments");
-    client.api(&endpoint, &[]).await
+    client.api_list(&endpoint, &[], limit).await
 }
 
 /// Get comments on a pull request (non-review, via issues API).
@@ -188,9 +208,10 @@ pub async fn comments(
     owner: &str,
     repo: &str,
     number: u32,
+    limit: Option<u32>,
 ) -> Result<Value, ClientError> {
     let endpoint = format!("/repos/{owner}/{repo}/issues/{number}/comments");
-    client.api(&endpoint, &[]).await
+    client.api_list(&endpoint, &[], limit).await
 }
 
 /// Get check runs for a PR's head commit.
@@ -761,8 +782,32 @@ mod tests {
     #[tokio::test]
     async fn test_files_pr() {
         let client = GithubClient::mock(vec![json!([{"filename": "a.rs"}])]);
-        let result = files(&client, "o", "r", 1).await.unwrap();
+        let result = files(&client, "o", "r", 1, None, false).await.unwrap();
         assert_eq!(result[0]["filename"], "a.rs");
+    }
+
+    #[tokio::test]
+    async fn test_files_pr_strips_patches_by_default() {
+        let client = GithubClient::mock(vec![json!([
+            {"filename": "a.rs", "patch": "@@ -1 +1 @@\n-x\n+y"},
+            {"filename": "b.rs", "patch": "@@ -1 +1 @@\n-foo\n+bar"},
+        ])]);
+        let result = files(&client, "o", "r", 1, None, false).await.unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for item in arr {
+            assert!(item.get("patch").is_none(), "patch field must be stripped");
+            assert!(item.get("filename").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_files_pr_keeps_patches_when_requested() {
+        let client = GithubClient::mock(vec![json!([
+            {"filename": "a.rs", "patch": "@@ -1 +1 @@"},
+        ])]);
+        let result = files(&client, "o", "r", 1, None, true).await.unwrap();
+        assert_eq!(result[0]["patch"], "@@ -1 +1 @@");
     }
 
     #[tokio::test]
@@ -810,21 +855,21 @@ mod tests {
     #[tokio::test]
     async fn test_reviews_pr() {
         let client = GithubClient::mock(vec![json!([{"id": 1}])]);
-        let result = reviews(&client, "o", "r", 1).await.unwrap();
+        let result = reviews(&client, "o", "r", 1, None).await.unwrap();
         assert!(result.is_array());
     }
 
     #[tokio::test]
     async fn test_review_comments_pr() {
         let client = GithubClient::mock(vec![json!([{"id": 1, "body": "nit"}])]);
-        let result = review_comments(&client, "o", "r", 1).await.unwrap();
+        let result = review_comments(&client, "o", "r", 1, None).await.unwrap();
         assert_eq!(result[0]["body"], "nit");
     }
 
     #[tokio::test]
     async fn test_comments_pr() {
         let client = GithubClient::mock(vec![json!([{"id": 1}])]);
-        let result = comments(&client, "o", "r", 1).await.unwrap();
+        let result = comments(&client, "o", "r", 1, None).await.unwrap();
         assert!(result.is_array());
     }
 
