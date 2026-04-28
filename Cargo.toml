@@ -24,6 +24,7 @@ base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
 # Force aws-lc-rs instead of ring (ring needs C compiler, crashes on WSL2)
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+wait-timeout = "0.2"
 
 [dev-dependencies]
 insta = { version = "1", features = ["json"] }
