@@ -3,9 +3,14 @@ use serde_json::Value;
 use crate::github::client::{ClientError, GithubClient};
 
 /// List branches for a repository.
-pub async fn list(client: &GithubClient, owner: &str, repo: &str) -> Result<Value, ClientError> {
+pub async fn list(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    limit: Option<u32>,
+) -> Result<Value, ClientError> {
     let endpoint = format!("/repos/{owner}/{repo}/branches");
-    client.api(&endpoint, &[]).await
+    client.api_list(&endpoint, &[], limit).await
 }
 
 /// Create a new branch from a given SHA.
@@ -66,7 +71,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_branches() {
         let client = GithubClient::mock(vec![json!([{"name": "main"}, {"name": "dev"}])]);
-        let result = list(&client, "o", "r").await.unwrap();
+        let result = list(&client, "o", "r", None).await.unwrap();
         assert_eq!(result.as_array().unwrap().len(), 2);
     }
 

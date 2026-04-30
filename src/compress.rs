@@ -13,6 +13,11 @@ pub struct CompressConfig {
     pub strip_urls: bool,
     pub fields: Option<Vec<String>>,
     pub format: OutputFormat,
+    /// If set, truncate the decoded `content` field on file responses to at
+    /// most this many bytes (UTF-8 boundary safe). `None` means no cap. Set
+    /// by the `github_files_get` tool to prevent multi-MB source files from
+    /// blowing the MCP token budget.
+    pub max_decoded_content_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,6 +36,7 @@ impl Default for CompressConfig {
             strip_urls: env_bool("KP_GITHUB_STRIP_URLS", true),
             fields: None,
             format: env_format("KP_GITHUB_FORMAT"),
+            max_decoded_content_bytes: None,
         }
     }
 }
@@ -97,7 +103,7 @@ pub fn compress(value: &Value, config: &CompressConfig, now: DateTime<Utc>) -> V
 fn compress_single(v: &mut Value, config: &CompressConfig, now: DateTime<Utc>) {
     if let Value::Object(map) = v {
         stage1_strip(map, config);
-        stage2_flatten(map);
+        stage2_flatten(map, config);
         if let Some(fields) = &config.fields {
             stage3_project(map, fields);
         }
@@ -174,7 +180,7 @@ fn stage1_strip(map: &mut Map<String, Value>, config: &CompressConfig) {
 }
 
 // Stage 2: Collapse nested objects to scalars
-fn stage2_flatten(map: &mut Map<String, Value>) {
+fn stage2_flatten(map: &mut Map<String, Value>, config: &CompressConfig) {
     // user: { login: "alice", ... } -> user: "alice"
     flatten_to_field(map, "user", "login");
     flatten_to_field(map, "author", "login");
@@ -225,7 +231,13 @@ fn stage2_flatten(map: &mut Map<String, Value>) {
                 match base64_decode(&cleaned) {
                     Ok(decoded) => match String::from_utf8(decoded) {
                         Ok(text) => {
-                            map.insert("content".to_string(), Value::String(text));
+                            // Apply optional content size cap to prevent
+                            // multi-MB source files from blowing token budgets.
+                            let final_text = match config.max_decoded_content_bytes {
+                                Some(cap) => crate::util::truncate_to_bytes(&text, cap),
+                                None => text,
+                            };
+                            map.insert("content".to_string(), Value::String(final_text));
                         }
                         Err(_) => {
                             // Binary file — restore encoding indicator

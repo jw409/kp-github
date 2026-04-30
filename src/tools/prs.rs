@@ -215,22 +215,34 @@ pub async fn comments(
 }
 
 /// Get check runs for a PR's head commit.
+///
+/// `limit` caps via server-side `?per_page` (max 100). Without a cap a
+/// monorepo PR running 30+ CI suites blows MCP token budgets.
 pub async fn check_runs(
     client: &GithubClient,
     owner: &str,
     repo: &str,
     number: u32,
+    limit: Option<u32>,
 ) -> Result<Value, ClientError> {
-    // First fetch the PR to get head SHA
     let pr = get(client, owner, repo, number).await?;
     let sha = pr["head"]["sha"]
         .as_str()
         .ok_or_else(|| ClientError::Api("missing head.sha in PR response".to_string()))?;
-    let endpoint = format!("/repos/{owner}/{repo}/commits/{sha}/check-runs");
+    let per_page = limit.unwrap_or(30).min(100);
+    let endpoint = format!("/repos/{owner}/{repo}/commits/{sha}/check-runs?per_page={per_page}");
     let result = client.api(&endpoint, &[]).await?;
-    result.get("check_runs")
+    let runs = result.get("check_runs")
         .cloned()
-        .ok_or_else(|| ClientError::Api("check_runs field missing from GitHub response".to_string()))
+        .ok_or_else(|| ClientError::Api("check_runs field missing from GitHub response".to_string()))?;
+    if let Some(arr) = runs.as_array() {
+        let mut arr = arr.clone();
+        if let Some(cap) = limit {
+            arr.truncate(cap as usize);
+        }
+        return Ok(Value::Array(arr));
+    }
+    Ok(runs)
 }
 
 /// Get combined status for a PR's head commit.
@@ -879,14 +891,14 @@ mod tests {
             json!({"head": {"sha": "abc123"}}),
             json!({"check_runs": [{"name": "ci"}]}),
         ]);
-        let result = check_runs(&client, "o", "r", 1).await.unwrap();
+        let result = check_runs(&client, "o", "r", 1, None).await.unwrap();
         assert!(result.is_array());
     }
 
     #[tokio::test]
     async fn test_check_runs_pr_missing_sha() {
         let client = GithubClient::mock(vec![json!({"head": {}})]);
-        let result = check_runs(&client, "o", "r", 1).await;
+        let result = check_runs(&client, "o", "r", 1, None).await;
         assert!(result.is_err());
     }
 

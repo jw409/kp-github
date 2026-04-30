@@ -219,6 +219,10 @@ pub struct PrDiffParams {
     pub repo: String,
     /// PR number
     pub number: u32,
+    /// Maximum diff size in bytes. Default ~64 KiB to fit comfortably in MCP
+    /// token budgets; bump for full context. Truncation appends a marker.
+    #[serde(default)]
+    pub max_bytes: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -433,6 +437,11 @@ pub struct FileGetParams {
     /// Git ref (branch, tag, or SHA)
     #[serde(default)]
     pub git_ref: Option<String>,
+    /// Maximum decoded file content size in bytes. Default ~64 KiB to fit
+    /// MCP token budgets. The base64-decoded `content` field is truncated
+    /// past this with a marker. Bump for full source of larger files.
+    #[serde(default)]
+    pub max_content_bytes: Option<u32>,
     /// Fields to include in output
     #[serde(default)]
     pub fields: Option<Vec<String>>,
@@ -548,6 +557,11 @@ pub struct CommitGetParams {
     pub repo: String,
     /// Commit SHA
     pub sha: String,
+    /// Include the per-file `patch` diff. Default false because patches
+    /// dominate response size on commits touching many files. Use
+    /// `prs_diff` for the unified diff or set true to opt in.
+    #[serde(default)]
+    pub include_patches: bool,
     /// Fields to include in output
     #[serde(default)]
     pub fields: Option<Vec<String>>,
@@ -594,6 +608,22 @@ pub struct TeamMembersParams {
     pub org: String,
     /// Team slug
     pub team_slug: String,
+    /// Maximum number of results
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Fields to include in output
+    #[serde(default)]
+    pub fields: Option<Vec<String>>,
+    /// Output format: json, table, text
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LimitFieldsParams {
+    /// Maximum number of results (default 30)
+    #[serde(default)]
+    pub limit: Option<u32>,
     /// Fields to include in output
     #[serde(default)]
     pub fields: Option<Vec<String>>,
@@ -824,6 +854,11 @@ pub struct CompareParams {
     pub base: String,
     /// Head branch/tag/SHA
     pub head: String,
+    /// Include the per-file `patch` diff in the compare response. Default
+    /// false; wide comparisons (e.g. `main...release/v5`) often touch
+    /// hundreds of files and overflow MCP token budgets.
+    #[serde(default)]
+    pub include_patches: bool,
     /// Fields to include in output
     #[serde(default)]
     pub fields: Option<Vec<String>>,
@@ -957,7 +992,9 @@ impl KpGithubServer {
     async fn github_prs_diff(&self, Parameters(p): Parameters<PrDiffParams>) -> Result<CallToolResult, McpError> {
         let result = tools::prs::diff(&self.client, &p.owner, &p.repo, p.number).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(result)]))
+        let max = p.max_bytes.map(|n| n as usize).unwrap_or(64 * 1024);
+        let truncated = crate::util::truncate_to_bytes(&result, max);
+        Ok(CallToolResult::success(vec![Content::text(truncated)]))
     }
 
     /// Get files changed in a pull request
@@ -1026,7 +1063,7 @@ impl KpGithubServer {
     /// Get check runs for a pull request's head commit
     #[rmcp::tool(name = "github_prs_checks")]
     async fn github_prs_checks(&self, Parameters(p): Parameters<IssueNumberFieldsParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::prs::check_runs(&self.client, &p.owner, &p.repo, p.number).await
+        let result = tools::prs::check_runs(&self.client, &p.owner, &p.repo, p.number, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1066,7 +1103,23 @@ impl KpGithubServer {
     async fn github_files_get(&self, Parameters(p): Parameters<FileGetParams>) -> Result<CallToolResult, McpError> {
         let result = tools::files::get_contents(&self.client, &p.owner, &p.repo, &p.path, p.git_ref.as_deref()).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let output = self.compress_and_format(result, p.fields, p.format);
+        // Cap decoded content size to fit MCP token budgets. Default 64 KiB
+        // matches prs_diff. Caller can override via `max_content_bytes`.
+        let cap = p.max_content_bytes.map(|n| n as usize).unwrap_or(64 * 1024);
+        let fmt = p.format.as_deref().map(|s| match s {
+            "json" => OutputFormat::Json,
+            "table" => OutputFormat::Table,
+            "text" => OutputFormat::Text,
+            _ => OutputFormat::Auto,
+        }).unwrap_or(OutputFormat::Auto);
+        let config = CompressConfig {
+            fields: p.fields,
+            format: fmt,
+            max_decoded_content_bytes: Some(cap),
+            ..CompressConfig::default()
+        };
+        let compressed = compress(&result, &config, Utc::now());
+        let output = format_output(&compressed, config.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -1147,8 +1200,8 @@ impl KpGithubServer {
 
     /// List branches in a repository
     #[rmcp::tool(name = "github_branches_list")]
-    async fn github_branches_list(&self, Parameters(p): Parameters<RepoFieldsParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::branches::list(&self.client, &p.owner, &p.repo).await
+    async fn github_branches_list(&self, Parameters(p): Parameters<RepoLimitParams>) -> Result<CallToolResult, McpError> {
+        let result = tools::branches::list(&self.client, &p.owner, &p.repo, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1177,7 +1230,7 @@ impl KpGithubServer {
     /// Get a single commit with diff
     #[rmcp::tool(name = "github_commits_get")]
     async fn github_commits_get(&self, Parameters(p): Parameters<CommitGetParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::commits::get(&self.client, &p.owner, &p.repo, &p.sha).await
+        let result = tools::commits::get(&self.client, &p.owner, &p.repo, &p.sha, p.include_patches).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1236,8 +1289,8 @@ impl KpGithubServer {
 
     /// List teams for the authenticated user
     #[rmcp::tool(name = "github_teams_list")]
-    async fn github_teams_list(&self, Parameters(p): Parameters<FieldsOnlyParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::teams::list(&self.client).await
+    async fn github_teams_list(&self, Parameters(p): Parameters<LimitFieldsParams>) -> Result<CallToolResult, McpError> {
+        let result = tools::teams::list(&self.client, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1246,7 +1299,7 @@ impl KpGithubServer {
     /// Get members of a team
     #[rmcp::tool(name = "github_teams_members")]
     async fn github_teams_members(&self, Parameters(p): Parameters<TeamMembersParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::teams::members(&self.client, &p.org, &p.team_slug).await
+        let result = tools::teams::members(&self.client, &p.org, &p.team_slug, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1447,8 +1500,8 @@ impl KpGithubServer {
 
     /// List workflows for a repository
     #[rmcp::tool(name = "github_actions_list_workflows")]
-    async fn github_actions_list_workflows(&self, Parameters(p): Parameters<RepoFieldsParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::actions::list_workflows(&self.client, &p.owner, &p.repo).await
+    async fn github_actions_list_workflows(&self, Parameters(p): Parameters<RepoLimitParams>) -> Result<CallToolResult, McpError> {
+        let result = tools::actions::list_workflows(&self.client, &p.owner, &p.repo, p.limit).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1467,7 +1520,7 @@ impl KpGithubServer {
     /// Compare two commits, branches, or tags
     #[rmcp::tool(name = "github_repos_compare")]
     async fn github_repos_compare(&self, Parameters(p): Parameters<CompareParams>) -> Result<CallToolResult, McpError> {
-        let result = tools::repos::compare(&self.client, &p.owner, &p.repo, &p.base, &p.head).await
+        let result = tools::repos::compare(&self.client, &p.owner, &p.repo, &p.base, &p.head, p.include_patches).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, p.fields, p.format);
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1624,6 +1677,9 @@ impl ServerHandler for KpGithubServer {
                     } else {
                         serde_json::to_string_pretty(&result).unwrap_or_default()
                     };
+                    // Cap the resource payload — a 1 MB monorepo README will
+                    // otherwise exhaust MCP token budgets.
+                    let text = crate::util::truncate_to_bytes(&text, 64 * 1024);
                     (text, "text/markdown")
                 }
                 "" => {
@@ -2810,8 +2866,23 @@ mod tests {
         let server = mock_server(vec![json!("diff --git a/file b/file")]);
         let result = server.github_prs_diff(Parameters(PrDiffParams {
             owner: "o".into(), repo: "r".into(), number: 1,
+            max_bytes: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("diff"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_prs_diff_truncates_oversize() {
+        // 200KB synthetic diff; default max_bytes = 64KB.
+        let huge = "x".repeat(200_000);
+        let server = mock_server(vec![json!(huge)]);
+        let result = server.github_prs_diff(Parameters(PrDiffParams {
+            owner: "o".into(), repo: "r".into(), number: 1,
+            max_bytes: None,
+        })).await.unwrap();
+        let text = ok_text(&result);
+        assert!(text.len() < 70_000, "default cap should bring response under ~64K + marker; got {}", text.len());
+        assert!(text.contains("truncated at"));
     }
 
     #[tokio::test]
@@ -2962,6 +3033,7 @@ mod tests {
         let server = mock_server(vec![json!({"message": "Updating pull request branch"})]);
         let result = server.github_prs_update_branch(Parameters(PrDiffParams {
             owner: "o".into(), repo: "r".into(), number: 1,
+            max_bytes: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("Updating"));
     }
@@ -3027,9 +3099,33 @@ mod tests {
         let server = mock_server(vec![json!({"name": "lib.rs", "content": "fn main(){}"})]);
         let result = server.github_files_get(Parameters(FileGetParams {
             owner: "o".into(), repo: "r".into(), path: "src/lib.rs".into(),
-            git_ref: Some("main".into()), fields: None, format: None,
+            git_ref: Some("main".into()), max_content_bytes: None,
+            fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("lib.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_files_get_truncates_oversize_content() {
+        // 200 KB synthetic source file. Default cap = 64 KiB.
+        let huge = "a".repeat(200_000);
+        // GitHub returns base64-encoded; encode our payload so the compress
+        // pipeline takes the decode-then-truncate path.
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(huge.as_bytes());
+        let server = mock_server(vec![json!({
+            "name": "huge.rs",
+            "encoding": "base64",
+            "content": b64,
+        })]);
+        let result = server.github_files_get(Parameters(FileGetParams {
+            owner: "o".into(), repo: "r".into(), path: "huge.rs".into(),
+            git_ref: None, max_content_bytes: None,
+            fields: None, format: None,
+        })).await.unwrap();
+        let text = ok_text(&result);
+        assert!(text.len() < 70_000, "default cap should bring response well below 200K; got {}", text.len());
+        assert!(text.contains("truncated at"));
     }
 
     #[tokio::test]
@@ -3123,6 +3219,7 @@ mod tests {
         let result = server.github_repos_compare(Parameters(CompareParams {
             owner: "o".into(), repo: "r".into(),
             base: "main".into(), head: "feature".into(),
+            include_patches: false,
             fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("ahead"));
@@ -3133,8 +3230,8 @@ mod tests {
     #[tokio::test]
     async fn test_tool_branches_list() {
         let server = mock_server(vec![json!([{"name": "main"}, {"name": "dev"}])]);
-        let result = server.github_branches_list(Parameters(RepoFieldsParams {
-            owner: "o".into(), repo: "r".into(), fields: None, format: None,
+        let result = server.github_branches_list(Parameters(RepoLimitParams {
+            owner: "o".into(), repo: "r".into(), limit: None, fields: None, format: None,
         })).await.unwrap();
         let text = ok_text(&result);
         assert!(text.contains("main"));
@@ -3168,6 +3265,7 @@ mod tests {
         let server = mock_server(vec![json!({"sha": "deadbeef", "commit": {"message": "fix bug"}})]);
         let result = server.github_commits_get(Parameters(CommitGetParams {
             owner: "o".into(), repo: "r".into(), sha: "deadbeef".into(),
+            include_patches: false,
             fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("fix bug"));
@@ -3243,8 +3341,8 @@ mod tests {
     #[tokio::test]
     async fn test_tool_teams_list() {
         let server = mock_server(vec![json!([{"name": "core", "slug": "core"}])]);
-        let result = server.github_teams_list(Parameters(FieldsOnlyParams {
-            fields: None, format: None,
+        let result = server.github_teams_list(Parameters(LimitFieldsParams {
+            limit: None, fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("core"));
     }
@@ -3254,7 +3352,7 @@ mod tests {
         let server = mock_server(vec![json!([{"login": "alice"}, {"login": "bob"}])]);
         let result = server.github_teams_members(Parameters(TeamMembersParams {
             org: "my-org".into(), team_slug: "core".into(),
-            fields: None, format: None,
+            limit: None, fields: None, format: None,
         })).await.unwrap();
         let text = ok_text(&result);
         assert!(text.contains("alice"));
@@ -3381,8 +3479,8 @@ mod tests {
     #[tokio::test]
     async fn test_tool_actions_list_workflows() {
         let server = mock_server(vec![json!({"workflows": [{"id": 1, "name": "CI"}]})]);
-        let result = server.github_actions_list_workflows(Parameters(RepoFieldsParams {
-            owner: "o".into(), repo: "r".into(), fields: None, format: None,
+        let result = server.github_actions_list_workflows(Parameters(RepoLimitParams {
+            owner: "o".into(), repo: "r".into(), limit: None, fields: None, format: None,
         })).await.unwrap();
         assert!(ok_text(&result).contains("CI"));
     }

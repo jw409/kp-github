@@ -84,6 +84,24 @@ pub fn validate_slug(s: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Truncate `s` to at most `max_bytes` bytes, respecting UTF-8 char
+/// boundaries. If truncated, appends a marker indicating original size.
+/// Returns the input unchanged if already within budget.
+pub fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n\n[kp-github: truncated at {max_bytes} bytes; original was {} bytes]",
+        &s[..end],
+        s.len()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +109,31 @@ mod tests {
     #[test]
     fn test_urlencode_spaces() {
         assert_eq!(urlencode("hello world"), "hello+world");
+    }
+
+    #[test]
+    fn test_truncate_passthrough_when_under_budget() {
+        assert_eq!(truncate_to_bytes("hello", 100), "hello");
+        assert_eq!(truncate_to_bytes("", 100), "");
+    }
+
+    #[test]
+    fn test_truncate_cuts_long_input() {
+        let s = "a".repeat(1000);
+        let out = truncate_to_bytes(&s, 100);
+        assert!(out.starts_with(&"a".repeat(100)));
+        assert!(out.contains("truncated at 100 bytes"));
+        assert!(out.contains("original was 1000 bytes"));
+    }
+
+    #[test]
+    fn test_truncate_respects_utf8_boundary() {
+        // "🦀" is a 4-byte char. Cutting at byte 2 inside it would panic
+        // on naive slicing; truncate_to_bytes must walk back to a boundary.
+        let s = "ab🦀cd";
+        let out = truncate_to_bytes(s, 3); // mid-emoji
+        assert!(out.starts_with("ab"));
+        assert!(!out.contains("🦀"), "should not include partial emoji");
     }
 
     #[test]

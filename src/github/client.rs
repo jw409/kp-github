@@ -338,6 +338,11 @@ impl GithubClient {
         body: &Value,
     ) -> Result<Value, ClientError> {
         validate_endpoint(endpoint)?;
+        // Overall budget: callers like push_files chain N invocations of
+        // api_json (1 per blob + tree + commit + ref-update). Without this
+        // wrapper a 50-file push had no upper bound — only per-call timeouts
+        // multiplied. Bound the whole thing.
+        with_overall_timeout(endpoint, async {
         match &self.backend {
             Backend::Http { client, token } => {
                 let url = format!("{}{endpoint}", self.base_url);
@@ -381,22 +386,28 @@ impl GithubClient {
 
                 let mut child = cmd.spawn().map_err(|e| ClientError::Cli(e.to_string()))?;
 
-                if let Some(mut stdin) = child.stdin.take() {
-                    use tokio::io::AsyncWriteExt;
-                    stdin
-                        .write_all(body_str.as_bytes())
+                // Wrap stdin write + wait_with_output in ONE timeout. Previously
+                // the stdin write ran outside any timeout — if `gh` stalled
+                // before reading stdin and the body exceeded the OS pipe buffer
+                // (~64 KiB, easily hit by push_files with many blobs),
+                // write_all would block forever before the SUBPROCESS_TIMEOUT
+                // around wait_with_output ever started.
+                let result = tokio::time::timeout(SUBPROCESS_TIMEOUT, async {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use tokio::io::AsyncWriteExt;
+                        stdin
+                            .write_all(body_str.as_bytes())
+                            .await
+                            .map_err(|e| ClientError::Cli(e.to_string()))?;
+                        drop(stdin);
+                    }
+                    child.wait_with_output()
                         .await
-                        .map_err(|e| ClientError::Cli(e.to_string()))?;
-                    drop(stdin);
-                }
-
-                let output = tokio::time::timeout(
-                    SUBPROCESS_TIMEOUT,
-                    child.wait_with_output(),
-                )
+                        .map_err(|e| ClientError::Cli(e.to_string()))
+                })
                 .await
-                .map_err(|_| ClientError::Timeout(format!("gh api {endpoint} timed out after {SUBPROCESS_TIMEOUT:?}")))?
-                .map_err(|e| ClientError::Cli(e.to_string()))?;
+                .map_err(|_| ClientError::Timeout(format!("gh api {endpoint} timed out after {SUBPROCESS_TIMEOUT:?}")))?;
+                let output = result?;
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -415,11 +426,14 @@ impl GithubClient {
                 q.pop_front().unwrap_or(Ok(Value::Null))
             }
         }
+        }).await
     }
 
     /// Call GitHub API with a custom Accept header, returning raw text.
     pub async fn api_raw(&self, endpoint: &str, accept: &str) -> Result<String, ClientError> {
         validate_endpoint(endpoint)?;
+        // Bound for consistency with api()/api_list()/api_json().
+        with_overall_timeout(endpoint, async {
         match &self.backend {
             Backend::Http { client, token } => {
                 let url = format!("{}{endpoint}", self.base_url);
@@ -471,6 +485,7 @@ impl GithubClient {
                 Ok(String::from_utf8_lossy(&output.stdout).to_string())
             }
         }
+        }).await
     }
 
     /// gh CLI fallback
@@ -525,11 +540,15 @@ fn is_retryable(status: reqwest::StatusCode) -> bool {
 }
 
 /// Calculate retry delay: use Retry-After header if present, otherwise exponential backoff.
+///
+/// Cap is intentionally well below `OVERALL_CALL_TIMEOUT` so that at least
+/// one full retry attempt (sleep + request) fits within the outer 90s
+/// budget. A 120s cap (the previous value) was effectively dead code: the
+/// overall timeout would fire mid-sleep.
 fn retry_delay(resp: &reqwest::Response, attempt: u32) -> Duration {
-    // Check Retry-After header (GitHub sends this on 429)
     if let Some(val) = resp.headers().get("retry-after") {
         if let Ok(secs) = val.to_str().unwrap_or("").parse::<u64>() {
-            return Duration::from_secs(secs.min(120)); // cap at 2 minutes
+            return Duration::from_secs(secs.min(30));
         }
     }
     // Exponential backoff: 1s, 2s, 4s

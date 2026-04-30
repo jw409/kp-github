@@ -47,13 +47,23 @@ pub async fn list_workflows(
     client: &GithubClient,
     owner: &str,
     repo: &str,
+    limit: Option<u32>,
 ) -> Result<Value, ClientError> {
-    let endpoint = format!("/repos/{owner}/{repo}/actions/workflows");
+    // GitHub returns `{total_count, workflows: [...]}`, so we can't use
+    // api_list directly. Cap server-side via `per_page` (max 100), then
+    // unwrap and trim client-side to the requested limit.
+    let per_page = limit.unwrap_or(30).min(100);
+    let endpoint = format!("/repos/{owner}/{repo}/actions/workflows?per_page={per_page}");
     let result = client.api(&endpoint, &[]).await?;
-    // Extract workflows array if wrapped
-    if let Value::Object(ref map) = result {
-        if let Some(workflows) = map.get("workflows") {
-            return Ok(workflows.clone());
+    if let Value::Object(map) = &result {
+        if let Some(workflows) = map.get("workflows").cloned() {
+            if let Some(mut arr) = workflows.as_array().cloned() {
+                if let Some(cap) = limit {
+                    arr.truncate(cap as usize);
+                }
+                return Ok(Value::Array(arr));
+            }
+            return Ok(workflows);
         }
     }
     Ok(result)
@@ -208,15 +218,24 @@ mod tests {
     #[tokio::test]
     async fn test_list_workflows_fn() {
         let client = GithubClient::mock(vec![json!({"workflows": [{"id": 1, "name": "CI"}]})]);
-        let result = list_workflows(&client, "o", "r").await.unwrap();
+        let result = list_workflows(&client, "o", "r", None).await.unwrap();
         assert!(result.is_array());
     }
 
     #[tokio::test]
     async fn test_list_workflows_no_wrapper() {
         let client = GithubClient::mock(vec![json!([{"id": 1}])]);
-        let result = list_workflows(&client, "o", "r").await.unwrap();
+        let result = list_workflows(&client, "o", "r", None).await.unwrap();
         assert!(result.is_array());
+    }
+
+    #[tokio::test]
+    async fn test_list_workflows_respects_limit() {
+        let client = GithubClient::mock(vec![json!({"workflows": [
+            {"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "c"},
+        ]})]);
+        let result = list_workflows(&client, "o", "r", Some(2)).await.unwrap();
+        assert_eq!(result.as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]

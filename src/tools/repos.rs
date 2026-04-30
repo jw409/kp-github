@@ -68,13 +68,19 @@ pub async fn compare(
     repo: &str,
     base: &str,
     head: &str,
+    include_patches: bool,
 ) -> Result<Value, ClientError> {
     // base/head can be SHAs, branches (`feature/foo`), or refspecs —
     // preserve `/` but encode anything else that would break the URL.
     let encoded_base = crate::util::urlencode_path_multi(base);
     let encoded_head = crate::util::urlencode_path_multi(head);
     let endpoint = format!("/repos/{owner}/{repo}/compare/{encoded_base}...{encoded_head}");
-    client.api(&endpoint, &[]).await
+    let mut result = client.api(&endpoint, &[]).await?;
+    if !include_patches {
+        // Same shape as commit detail: response.files[*].patch can be huge.
+        crate::tools::commits::strip_patches(&mut result);
+    }
+    Ok(result)
 }
 
 /// Fork a repository.
@@ -223,8 +229,34 @@ mod tests {
     #[tokio::test]
     async fn test_compare_repos() {
         let client = GithubClient::mock(vec![json!({"status": "ahead"})]);
-        let result = compare(&client, "o", "r", "main", "feat").await.unwrap();
+        let result = compare(&client, "o", "r", "main", "feat", false).await.unwrap();
         assert_eq!(result["status"], "ahead");
+    }
+
+    #[tokio::test]
+    async fn test_compare_strips_patches_by_default() {
+        let client = GithubClient::mock(vec![json!({
+            "status": "ahead",
+            "files": [
+                {"filename": "a.rs", "patch": "@@ huge @@"},
+                {"filename": "b.rs", "patch": "@@ another @@"},
+            ],
+        })]);
+        let result = compare(&client, "o", "r", "main", "feat", false).await.unwrap();
+        for f in result["files"].as_array().unwrap() {
+            assert!(f.get("patch").is_none());
+            assert!(f.get("filename").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compare_keeps_patches_when_requested() {
+        let client = GithubClient::mock(vec![json!({
+            "status": "ahead",
+            "files": [{"filename": "a.rs", "patch": "@@ keep @@"}],
+        })]);
+        let result = compare(&client, "o", "r", "main", "feat", true).await.unwrap();
+        assert_eq!(result["files"][0]["patch"], "@@ keep @@");
     }
 
     #[test]
@@ -257,7 +289,7 @@ mod tests {
             .await;
 
         let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
-        let result = compare(&client, "o", "r", "main", "feature/my-fix").await;
+        let result = compare(&client, "o", "r", "main", "feature/my-fix", false).await;
         assert!(result.is_ok(), "{result:?}");
     }
 
