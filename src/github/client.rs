@@ -13,6 +13,12 @@ const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_PAGES: usize = 50;
 /// Maximum number of retries for 429/5xx responses.
 const MAX_RETRIES: u32 = 3;
+/// Overall budget for a single tool call. Bounds the worst-case interaction
+/// of retries (`MAX_RETRIES` × Retry-After up to 120s), pagination
+/// (`MAX_PAGES` × `REQUEST_TIMEOUT`), and parse time. Picked to comfortably
+/// exceed normal slow paths (a 50-page paginate returning ~1s/page takes
+/// ~50s) while ensuring the MCP server can't hang a caller indefinitely.
+const OVERALL_CALL_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Error, Debug)]
 pub enum ClientError {
@@ -80,72 +86,78 @@ impl GithubClient {
     /// Call GitHub API — GET request
     pub async fn api(&self, endpoint: &str, args: &[&str]) -> Result<Value, ClientError> {
         validate_endpoint(endpoint)?;
-        match &self.backend {
-            Backend::Http { client, token } => {
-                let method = extract_method(args);
-                let fields = extract_fields(args);
-                let url = format!("{}{endpoint}", self.base_url);
-                let body = if !fields.is_empty() { Some(fields_to_json(&fields)) } else { None };
+        // Overall budget across the retry loop. Without this, MAX_RETRIES (3)
+        // × Retry-After cap (120s) plus per-request timeout could keep a tool
+        // call live for several minutes — long enough to look like a hang to
+        // the MCP caller. Bound it.
+        with_overall_timeout(endpoint, async {
+            match &self.backend {
+                Backend::Http { client, token } => {
+                    let method = extract_method(args);
+                    let fields = extract_fields(args);
+                    let url = format!("{}{endpoint}", self.base_url);
+                    let body = if !fields.is_empty() { Some(fields_to_json(&fields)) } else { None };
 
-                let mut retries = 0u32;
-                loop {
-                    let req = match method {
-                        "POST" => {
-                            let r = client.post(&url);
-                            if let Some(ref b) = body { r.json(b) } else { r }
-                        }
-                        "PATCH" => {
-                            let r = client.patch(&url);
-                            if let Some(ref b) = body { r.json(b) } else { r }
-                        }
-                        "PUT" => {
-                            let r = client.put(&url);
-                            if let Some(ref b) = body { r.json(b) } else { r }
-                        }
-                        "DELETE" => {
-                            let r = client.delete(&url);
-                            if let Some(ref b) = body { r.json(b) } else { r }
-                        }
-                        _ => client.get(&url),
-                    };
+                    let mut retries = 0u32;
+                    loop {
+                        let req = match method {
+                            "POST" => {
+                                let r = client.post(&url);
+                                if let Some(ref b) = body { r.json(b) } else { r }
+                            }
+                            "PATCH" => {
+                                let r = client.patch(&url);
+                                if let Some(ref b) = body { r.json(b) } else { r }
+                            }
+                            "PUT" => {
+                                let r = client.put(&url);
+                                if let Some(ref b) = body { r.json(b) } else { r }
+                            }
+                            "DELETE" => {
+                                let r = client.delete(&url);
+                                if let Some(ref b) = body { r.json(b) } else { r }
+                            }
+                            _ => client.get(&url),
+                        };
 
-                    let resp = req
-                        .header(AUTHORIZATION, format!("Bearer {token}"))
-                        .header(ACCEPT, "application/vnd.github+json")
-                        .header("X-GitHub-Api-Version", "2022-11-28")
-                        .send()
-                        .await?;
+                        let resp = req
+                            .header(AUTHORIZATION, format!("Bearer {token}"))
+                            .header(ACCEPT, "application/vnd.github+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                            .send()
+                            .await?;
 
-                    check_rate_limit_and_retry(&resp);
+                        check_rate_limit_and_retry(&resp);
 
-                    let status = resp.status();
-                    if is_retryable(status) && retries < MAX_RETRIES {
-                        let wait = retry_delay(&resp, retries);
-                        tracing::warn!("GitHub {status}, retrying in {wait:?} (attempt {}/{})", retries + 1, MAX_RETRIES);
-                        tokio::time::sleep(wait).await;
-                        retries += 1;
-                        continue;
+                        let status = resp.status();
+                        if is_retryable(status) && retries < MAX_RETRIES {
+                            let wait = retry_delay(&resp, retries);
+                            tracing::warn!("GitHub {status}, retrying in {wait:?} (attempt {}/{})", retries + 1, MAX_RETRIES);
+                            tokio::time::sleep(wait).await;
+                            retries += 1;
+                            continue;
+                        }
+
+                        if !status.is_success() {
+                            let body = resp.text().await.unwrap_or_default();
+                            return Err(ClientError::Api(format!("{status}: {body}")));
+                        }
+
+                        let text = resp.text().await?;
+                        if text.trim().is_empty() {
+                            return Ok(Value::Null);
+                        }
+                        return Ok(serde_json::from_str(&text)?);
                     }
-
-                    if !status.is_success() {
-                        let body = resp.text().await.unwrap_or_default();
-                        return Err(ClientError::Api(format!("{status}: {body}")));
-                    }
-
-                    let text = resp.text().await?;
-                    if text.trim().is_empty() {
-                        return Ok(Value::Null);
-                    }
-                    return Ok(serde_json::from_str(&text)?);
+                }
+                Backend::GhCli => self.gh_cli_api(endpoint, args).await,
+                #[cfg(test)]
+                Backend::Mock { responses } => {
+                    let mut q = responses.lock().unwrap();
+                    q.pop_front().unwrap_or(Ok(Value::Null))
                 }
             }
-            Backend::GhCli => self.gh_cli_api(endpoint, args).await,
-            #[cfg(test)]
-            Backend::Mock { responses } => {
-                let mut q = responses.lock().unwrap();
-                q.pop_front().unwrap_or(Ok(Value::Null))
-            }
-        }
+        }).await
     }
 
     /// List endpoint with query params — paginates automatically for limit > 100.
@@ -164,6 +176,10 @@ impl GithubClient {
             url.push_str(&format!("&{k}={}", crate::util::urlencode(v)));
         }
 
+        // Overall budget across all pages. Without this a 50-page paginate
+        // crawl combined with slow GitHub responses could keep the MCP loop
+        // unresponsive long enough to look hung. Bound it.
+        with_overall_timeout(endpoint, async {
         match &self.backend {
             Backend::Http { client, token } => {
                 let mut all_items: Vec<Value> = Vec::new();
@@ -310,6 +326,7 @@ impl GithubClient {
                 Ok(Value::Array(all_items))
             }
         }
+        }).await
     }
 
     /// POST/PATCH/PUT a JSON body directly (not via -f key=value args).
@@ -484,6 +501,21 @@ impl GithubClient {
             return Ok(Value::Null);
         }
         Ok(serde_json::from_str(&stdout)?)
+    }
+}
+
+/// Wrap an API call future in `OVERALL_CALL_TIMEOUT`. On timeout returns
+/// `ClientError::Timeout` naming the endpoint so MCP callers see a clean
+/// error instead of a hung tool.
+async fn with_overall_timeout<F, T>(endpoint: &str, fut: F) -> Result<T, ClientError>
+where
+    F: std::future::Future<Output = Result<T, ClientError>>,
+{
+    match tokio::time::timeout(OVERALL_CALL_TIMEOUT, fut).await {
+        Ok(res) => res,
+        Err(_) => Err(ClientError::Timeout(format!(
+            "GitHub API call to {endpoint} exceeded overall budget of {OVERALL_CALL_TIMEOUT:?}"
+        ))),
     }
 }
 
@@ -1359,6 +1391,35 @@ mod tests {
         let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
         let result = client.api("/repos/o/r", &[]).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_with_overall_timeout_aborts_long_call() {
+        // Regression: prs_list-style hangs reported in the field. The overall
+        // budget must abort a slow operation well before the legacy worst case
+        // (retries × Retry-After cap = several minutes). With paused time,
+        // tokio advances virtual time to fire timers without real wall sleep.
+        let result: Result<i32, ClientError> = with_overall_timeout(
+            "/repos/o/r/pulls",
+            async {
+                tokio::time::sleep(Duration::from_secs(600)).await;
+                Ok(0)
+            },
+        ).await;
+        match result {
+            Err(ClientError::Timeout(msg)) => {
+                assert!(msg.contains("/repos/o/r/pulls"), "msg should name endpoint: {msg}");
+            }
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_with_overall_timeout_passes_through_success() {
+        // The wrapper must not interfere with fast paths.
+        let result: Result<i32, ClientError> =
+            with_overall_timeout("/x", async { Ok(42) }).await;
+        assert_eq!(result.unwrap(), 42);
     }
 
     #[tokio::test]
