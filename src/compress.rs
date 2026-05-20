@@ -351,10 +351,11 @@ fn stage4_compact(map: &mut Map<String, Value>, config: &CompressConfig, now: Da
                         continue;
                     }
                 }
-                // SHA truncation
-                if (key.ends_with("_sha") || key == "sha") && s.len() > 7 {
-                    map.insert(key.clone(), Value::String(s[..7].to_string()));
-                }
+                // SHAs are deliberately NOT truncated: mutating endpoints
+                // (branches_create, files_create_or_update, refs) require the
+                // full 40-char SHA and silently reject abbreviated forms.
+                // Truncating output forced callers into an extra round-trip to
+                // re-expand them.
             }
             Value::Null => {
                 map.remove(&key);
@@ -575,11 +576,14 @@ mod tests {
     }
 
     #[test]
-    fn test_sha_truncation() {
-        let input = json!({ "sha": "abc1234567890def" });
+    fn test_sha_not_truncated() {
+        // SHAs must survive compression intact — mutating endpoints reject
+        // abbreviated SHAs.
+        let full = "abc1234567890def1234567890abcdef12345678";
+        let input = json!({ "sha": full });
         let config = CompressConfig::default();
         let result = compress(&input, &config, now());
-        assert_eq!(result["sha"], "abc1234");
+        assert_eq!(result["sha"], full);
     }
 
     #[test]
@@ -675,7 +679,7 @@ mod tests {
         let config = CompressConfig::default();
         let result = compress(&input, &config, now());
         assert_eq!(result["head_ref"], "main");
-        assert_eq!(result["head_sha"], "abc1234"); // truncated to 7
+        assert_eq!(result["head_sha"], "abc1234567890def"); // preserved in full
         assert!(result.get("head").is_none()); // original removed
     }
 
@@ -941,7 +945,7 @@ mod tests {
         let config = CompressConfig::default();
         let result = compress(&input, &config, now());
         assert_eq!(result["base_ref"], "main");
-        assert_eq!(result["base_sha"], "def7890"); // truncated
+        assert_eq!(result["base_sha"], "def7890123456789"); // preserved in full
         assert_eq!(result["base_repo"], "org/upstream");
     }
 
@@ -963,27 +967,19 @@ mod tests {
     }
 
     #[test]
-    fn test_sha_short_not_truncated() {
+    fn test_sha_short_preserved() {
         let input = json!({"sha": "abc123"});
         let config = CompressConfig::default();
         let result = compress(&input, &config, now());
-        assert_eq!(result["sha"], "abc123"); // 6 chars, not truncated
+        assert_eq!(result["sha"], "abc123");
     }
 
     #[test]
-    fn test_sha_exactly_7_not_truncated() {
-        let input = json!({"sha": "abc1234"});
+    fn test_head_sha_preserved() {
+        let input = json!({"head_sha": "abc1234567890abcdef1234567890abcdef123456"});
         let config = CompressConfig::default();
         let result = compress(&input, &config, now());
-        assert_eq!(result["sha"], "abc1234"); // exactly 7, not truncated
-    }
-
-    #[test]
-    fn test_head_sha_truncated() {
-        let input = json!({"head_sha": "abc1234567890"});
-        let config = CompressConfig::default();
-        let result = compress(&input, &config, now());
-        assert_eq!(result["head_sha"], "abc1234");
+        assert_eq!(result["head_sha"], "abc1234567890abcdef1234567890abcdef123456");
     }
 
     #[test]

@@ -145,6 +145,65 @@ pub async fn update(
     client.api(&endpoint, &args).await
 }
 
+/// Convert a pull request between draft and ready-for-review state.
+///
+/// The REST `PATCH /pulls/{n}` endpoint cannot change draft status — only
+/// GitHub's GraphQL API can, via `convertPullRequestToDraft` /
+/// `markPullRequestReadyForReview`. Those mutations take the PR's GraphQL
+/// node ID, so we first fetch the PR to read `node_id`, then run the mutation.
+pub async fn set_draft(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    number: u32,
+    draft: bool,
+) -> Result<Value, ClientError> {
+    let pr = get(client, owner, repo, number).await?;
+    let node_id = pr
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            ClientError::Api(format!(
+                "pull request {owner}/{repo}#{number} response has no node_id"
+            ))
+        })?;
+
+    let mutation = if draft {
+        "convertPullRequestToDraft"
+    } else {
+        "markPullRequestReadyForReview"
+    };
+    let query = format!(
+        "mutation($id:ID!){{{mutation}(input:{{pullRequestId:$id}}){{pullRequest{{number isDraft state}}}}}}"
+    );
+    let body = serde_json::json!({
+        "query": query,
+        "variables": { "id": node_id },
+    });
+
+    let resp = client.api_json("/graphql", "POST", &body).await?;
+
+    // GraphQL returns HTTP 200 even for errors — the failure is in the body.
+    if let Some(errors) = resp.get("errors").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            let msg = errors
+                .iter()
+                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(ClientError::Api(format!("GraphQL {mutation} failed: {msg}")));
+        }
+    }
+
+    // Unwrap data.<mutation>.pullRequest so the caller sees a clean PR object.
+    Ok(resp
+        .get("data")
+        .and_then(|d| d.get(mutation))
+        .and_then(|m| m.get("pullRequest"))
+        .cloned()
+        .unwrap_or(resp))
+}
+
 /// Merge a pull request.
 pub async fn merge(
     client: &GithubClient,
@@ -848,6 +907,52 @@ mod tests {
         let client = GithubClient::mock(vec![json!({"number": 10})]);
         let result = update(&client, "o", "r", 10, None, None, None, None).await.unwrap();
         assert_eq!(result["number"], 10);
+    }
+
+    #[tokio::test]
+    async fn test_set_draft_ready_for_review() {
+        // 1st response: GET /pulls/N returning node_id.
+        // 2nd response: the GraphQL mutation result.
+        let client = GithubClient::mock(vec![
+            json!({"number": 7, "node_id": "PR_node_abc", "draft": true}),
+            json!({"data": {"markPullRequestReadyForReview": {"pullRequest": {"number": 7, "isDraft": false, "state": "OPEN"}}}}),
+        ]);
+        let result = set_draft(&client, "o", "r", 7, false).await.unwrap();
+        assert_eq!(result["number"], 7);
+        assert_eq!(result["isDraft"], false);
+    }
+
+    #[tokio::test]
+    async fn test_set_draft_convert_to_draft() {
+        let client = GithubClient::mock(vec![
+            json!({"number": 7, "node_id": "PR_node_abc", "draft": false}),
+            json!({"data": {"convertPullRequestToDraft": {"pullRequest": {"number": 7, "isDraft": true, "state": "OPEN"}}}}),
+        ]);
+        let result = set_draft(&client, "o", "r", 7, true).await.unwrap();
+        assert_eq!(result["isDraft"], true);
+    }
+
+    #[tokio::test]
+    async fn test_set_draft_missing_node_id() {
+        // PR response without node_id should produce a clear error rather
+        // than firing a malformed GraphQL mutation.
+        let client = GithubClient::mock(vec![json!({"number": 7})]);
+        let err = set_draft(&client, "o", "r", 7, false).await.unwrap_err();
+        assert!(err.to_string().contains("node_id"));
+    }
+
+    #[tokio::test]
+    async fn test_set_draft_graphql_error_propagates() {
+        // GraphQL returns HTTP 200 with `errors` for permission failures etc;
+        // these must surface as ClientError instead of looking like success.
+        let client = GithubClient::mock(vec![
+            json!({"number": 7, "node_id": "PR_node_abc"}),
+            json!({"errors": [{"message": "not authorized"}]}),
+        ]);
+        let err = set_draft(&client, "o", "r", 7, true).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not authorized"), "msg was: {msg}");
+        assert!(msg.contains("convertPullRequestToDraft"));
     }
 
     #[tokio::test]
