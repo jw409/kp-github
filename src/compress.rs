@@ -13,6 +13,11 @@ pub struct CompressConfig {
     pub strip_urls: bool,
     pub fields: Option<Vec<String>>,
     pub format: OutputFormat,
+    /// Waste-listed keys to retain on the default (no explicit `fields`) path,
+    /// from `KP_GITHUB_KEEP_FIELDS` (comma-separated). Lets a user pin fields
+    /// like `verification` or `author_association` into every response without
+    /// requesting them per-call. Per-call `fields` still takes precedence.
+    pub keep_fields: Vec<String>,
     /// If set, truncate the decoded `content` field on file responses to at
     /// most this many bytes (UTF-8 boundary safe). `None` means no cap. Set
     /// by the `github_files_get` tool to prevent multi-MB source files from
@@ -36,9 +41,27 @@ impl Default for CompressConfig {
             strip_urls: env_bool("KP_GITHUB_STRIP_URLS", true),
             fields: None,
             format: env_format("KP_GITHUB_FORMAT"),
+            keep_fields: env_csv("KP_GITHUB_KEEP_FIELDS"),
             max_decoded_content_bytes: None,
         }
     }
+}
+
+/// Parse a comma-separated string into a deduped, trimmed, non-empty list.
+fn parse_csv(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for piece in raw.split(',') {
+        let trimmed = piece.trim();
+        if !trimmed.is_empty() && !out.iter().any(|s| s == trimmed) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+/// Read a comma-separated env var. Missing var yields an empty Vec.
+fn env_csv(key: &str) -> Vec<String> {
+    std::env::var(key).ok().map(|s| parse_csv(&s)).unwrap_or_default()
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -111,8 +134,30 @@ fn compress_single(v: &mut Value, config: &CompressConfig, now: DateTime<Utc>) {
     }
 }
 
-// Stage 1: Remove pure token waste
+// Stage 1: Omit low-value fields by default.
+//
+// This list is a DEFAULT-ONLY heuristic to keep responses small, not a hard
+// exclusion: an explicit `fields` request always wins (see the `requested`
+// guard below). Many of these keys are load-bearing for *some* caller
+// (`verification` for commit-signature/compliance, `author_association` and
+// `type` for maintainer/bot triage, `state_reason` for issue outcome, `node_id`
+// for GraphQL), so the contract is "omitted unless you ask", never "unreachable".
 fn stage1_strip(map: &mut Map<String, Value>, config: &CompressConfig) {
+    // Keys the caller (per-call `fields`) or operator (`KP_GITHUB_KEEP_FIELDS`)
+    // wants kept are never stripped here — without this guard, stage1 would
+    // remove them irreversibly before stage3 could honor the request. This is
+    // what made `draft` unreachable. Per-call still wins via stage3 projection;
+    // `keep_fields` only matters when `fields` is unset.
+    let mut keep: std::collections::HashSet<&str> = config
+        .fields
+        .as_deref()
+        .map(|f| f.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    for k in &config.keep_fields {
+        keep.insert(k.as_str());
+    }
+    let requested = keep;
+
     let waste_keys: &[&str] = &[
         "avatar_url",
         "gravatar_id",
@@ -138,7 +183,6 @@ fn stage1_strip(map: &mut Map<String, Value>, config: &CompressConfig) {
         "locked",
         "performed_via_github_app",
         "active_lock_reason",
-        "draft",
         "timeline_url",
         "state_reason",
         "_links",
@@ -149,13 +193,15 @@ fn stage1_strip(map: &mut Map<String, Value>, config: &CompressConfig) {
     ];
 
     for key in waste_keys {
-        map.remove(*key);
+        if !requested.contains(*key) {
+            map.remove(*key);
+        }
     }
 
     if config.strip_urls {
         let url_keys: Vec<String> = map
             .keys()
-            .filter(|k| k.ends_with("_url") && *k != "html_url")
+            .filter(|k| k.ends_with("_url") && *k != "html_url" && !requested.contains(k.as_str()))
             .cloned()
             .collect();
         for key in url_keys {
@@ -704,6 +750,77 @@ mod tests {
     }
 
     #[test]
+    fn test_draft_survives_compression() {
+        // The `draft` boolean distinguishes ready-for-review PRs from drafts and
+        // is load-bearing for ship-triage callers. Regression for the version
+        // where it was misclassified as "pure token waste" and stripped.
+        let input = json!({
+            "number": 42,
+            "title": "feat: add widget",
+            "draft": true,
+            "state": "open"
+        });
+        let config = CompressConfig::default();
+        let result = compress(&input, &config, now());
+        assert_eq!(result["draft"], true);
+
+        let input_ready = json!({"number": 43, "draft": false, "state": "open"});
+        let result_ready = compress(&input_ready, &config, now());
+        assert_eq!(result_ready["draft"], false);
+    }
+
+    #[test]
+    fn test_explicit_fields_override_waste_strip() {
+        // A waste-listed field the caller explicitly requests must survive.
+        // The strip list is an omit-by-default heuristic, not a hard ceiling.
+        let input = json!({
+            "sha": "abc",
+            "verification": { "verified": true, "reason": "valid" },
+            "author_association": "MEMBER",
+            "avatar_url": "https://example.com/a.png"
+        });
+        let mut config = CompressConfig::default();
+        config.fields = Some(vec!["verification".into(), "author_association".into()]);
+        let result = compress(&input, &config, now());
+        assert_eq!(result["verification"]["verified"], true);
+        assert_eq!(result["author_association"], "MEMBER");
+        // Not-requested keys (including other waste keys) are still dropped.
+        assert!(result.get("avatar_url").is_none());
+        assert!(result.get("sha").is_none());
+    }
+
+    #[test]
+    fn test_keep_fields_retains_waste_keys_on_default_path() {
+        // KP_GITHUB_KEEP_FIELDS pins waste keys into the default (no `fields`)
+        // response. Operator-level default-inclusion without per-call requests.
+        let input = json!({
+            "title": "Signed work",
+            "verification": { "verified": true },
+            "author_association": "OWNER",
+            "avatar_url": "https://example.com/a.png"
+        });
+        let config = CompressConfig {
+            keep_fields: vec!["verification".into(), "author_association".into()],
+            ..CompressConfig::default()
+        };
+        let result = compress(&input, &config, now());
+        assert_eq!(result["verification"]["verified"], true);
+        assert_eq!(result["author_association"], "OWNER");
+        assert_eq!(result["title"], "Signed work");
+        // Waste keys NOT in keep_fields are still dropped.
+        assert!(result.get("avatar_url").is_none());
+    }
+
+    #[test]
+    fn test_parse_csv() {
+        assert_eq!(parse_csv(""), Vec::<String>::new());
+        assert_eq!(parse_csv("verification"), vec!["verification"]);
+        assert_eq!(parse_csv("a, b ,c"), vec!["a", "b", "c"]);
+        assert_eq!(parse_csv("dup,dup, dup"), vec!["dup"]);
+        assert_eq!(parse_csv(" , ,"), Vec::<String>::new());
+    }
+
+    #[test]
     fn test_compress_array() {
         let input = json!([
             {"title": "A", "node_id": "x", "user": {"login": "alice", "id": 1}},
@@ -1036,7 +1153,6 @@ mod tests {
             "locked": false,
             "performed_via_github_app": null,
             "active_lock_reason": null,
-            "draft": false,
             "timeline_url": "x",
             "state_reason": "x"
         });
