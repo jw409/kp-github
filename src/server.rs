@@ -481,15 +481,17 @@ pub struct FileCreateOrUpdateParams {
     /// new files). Abbreviated SHAs are rejected by the GitHub API.
     #[serde(default)]
     pub sha: Option<String>,
-    /// Override commit author name. Must be set together with `author_email`;
-    /// omit both to fall back to the OAuth user's identity.
+    /// Override commit author name. Must be set together with `author_email`.
+    /// Omit both to fall back to the GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL env vars
+    /// on the server, then the OAuth user's identity.
     #[serde(default)]
     pub author_name: Option<String>,
     /// Override commit author email. Pair with `author_name`.
     #[serde(default)]
     pub author_email: Option<String>,
-    /// Override commit committer name. Must be set together with `committer_email`;
-    /// omit both to fall back to the OAuth user's identity.
+    /// Override commit committer name. Must be set together with `committer_email`.
+    /// Omit both to fall back to GIT_COMMITTER_* env, then the author, then the
+    /// OAuth user.
     #[serde(default)]
     pub committer_name: Option<String>,
     /// Override commit committer email. Pair with `committer_name`.
@@ -1160,15 +1162,12 @@ impl KpGithubServer {
     /// Create or update a file in a repository (content must be base64-encoded)
     #[rmcp::tool(name = "github_files_create_or_update")]
     async fn github_files_create_or_update(&self, Parameters(p): Parameters<FileCreateOrUpdateParams>) -> Result<CallToolResult, McpError> {
-        let identity = tools::files::CommitIdentity {
-            author_name: p.author_name.as_deref(),
-            author_email: p.author_email.as_deref(),
-            committer_name: p.committer_name.as_deref(),
-            committer_email: p.committer_email.as_deref(),
-        };
+        let identity = tools::files::OwnedCommitIdentity::resolve(
+            p.author_name, p.author_email, p.committer_name, p.committer_email,
+        ).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let result = tools::files::create_or_update(
             &self.client, &p.owner, &p.repo, &p.path, &p.content, &p.message, &p.branch,
-            p.sha.as_deref(), &identity,
+            p.sha.as_deref(), &identity.as_borrowed(),
         ).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, None, None);
@@ -1178,14 +1177,11 @@ impl KpGithubServer {
     /// Delete a file from a repository
     #[rmcp::tool(name = "github_files_delete")]
     async fn github_files_delete(&self, Parameters(p): Parameters<FileDeleteParams>) -> Result<CallToolResult, McpError> {
-        let identity = tools::files::CommitIdentity {
-            author_name: p.author_name.as_deref(),
-            author_email: p.author_email.as_deref(),
-            committer_name: p.committer_name.as_deref(),
-            committer_email: p.committer_email.as_deref(),
-        };
+        let identity = tools::files::OwnedCommitIdentity::resolve(
+            p.author_name, p.author_email, p.committer_name, p.committer_email,
+        ).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let result = tools::files::delete(
-            &self.client, &p.owner, &p.repo, &p.path, &p.message, &p.branch, &p.sha, &identity,
+            &self.client, &p.owner, &p.repo, &p.path, &p.message, &p.branch, &p.sha, &identity.as_borrowed(),
         ).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, None, None);
@@ -1442,14 +1438,11 @@ impl KpGithubServer {
     /// Push multiple files to a repository (sequential create_or_update per file)
     #[rmcp::tool(name = "github_files_push")]
     async fn github_files_push(&self, Parameters(p): Parameters<FilePushParams>) -> Result<CallToolResult, McpError> {
-        let identity = tools::files::CommitIdentity {
-            author_name: p.author_name.as_deref(),
-            author_email: p.author_email.as_deref(),
-            committer_name: p.committer_name.as_deref(),
-            committer_email: p.committer_email.as_deref(),
-        };
+        let identity = tools::files::OwnedCommitIdentity::resolve(
+            p.author_name, p.author_email, p.committer_name, p.committer_email,
+        ).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let result = tools::files::push_files(
-            &self.client, &p.owner, &p.repo, &p.branch, &p.message, &p.files_json, &identity,
+            &self.client, &p.owner, &p.repo, &p.branch, &p.message, &p.files_json, &identity.as_borrowed(),
         ).await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let output = self.compress_and_format(result, None, None);

@@ -55,6 +55,132 @@ impl<'a> CommitIdentity<'a> {
     }
 }
 
+/// Owned commit identity built by layering caller-supplied args over env vars.
+///
+/// The MCP adapter constructs this once per commit-creating tool call:
+///   * Per-field precedence: caller arg → env var → unset.
+///   * Env vars read: `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`,
+///     `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`.
+///   * Each side (author/committer) must be both-set or both-unset; a half-set
+///     pair (after the env layer) is rejected as a caller error.
+///   * Cascade: if the committer side ends up fully unset *and* the author
+///     side is fully set, committer mirrors author. This means a single
+///     `GIT_AUTHOR_*` env pair attributes both sides correctly instead of
+///     leaving the committer to silently fall back to the OAuth user.
+///   * `KP_GITHUB_REQUIRE_AUTHOR=1` (or `true`/`yes`) turns "no author
+///     resolved" into a hard error, so a misconfigured deployment fails loud
+///     instead of stamping commits with the token owner's identity.
+///
+/// Borrow as a `CommitIdentity<'_>` via `as_borrowed()` to pass into the
+/// commit-creating functions.
+#[derive(Debug, Default, Clone)]
+pub struct OwnedCommitIdentity {
+    pub author_name: Option<String>,
+    pub author_email: Option<String>,
+    pub committer_name: Option<String>,
+    pub committer_email: Option<String>,
+}
+
+impl OwnedCommitIdentity {
+    /// Resolve using the process environment. See struct docs for layering rules.
+    pub fn resolve(
+        author_name: Option<String>,
+        author_email: Option<String>,
+        committer_name: Option<String>,
+        committer_email: Option<String>,
+    ) -> Result<Self, ClientError> {
+        Self::resolve_with_env(
+            author_name,
+            author_email,
+            committer_name,
+            committer_email,
+            |k| std::env::var(k).ok(),
+        )
+    }
+
+    /// Test-friendly resolution: caller supplies the env lookup closure so unit
+    /// tests can stub env without touching the real process environment (which
+    /// would race against other tests).
+    pub fn resolve_with_env<F: Fn(&str) -> Option<String>>(
+        author_name: Option<String>,
+        author_email: Option<String>,
+        committer_name: Option<String>,
+        committer_email: Option<String>,
+        env: F,
+    ) -> Result<Self, ClientError> {
+        // Layer 1: caller arg, else env, per individual field.
+        // Treats empty strings as unset so an exported-but-empty env var
+        // doesn't accidentally produce `{"name": "", "email": ""}`. We also
+        // treat empty *caller* strings as unset for the same reason — a JSON
+        // `""` is almost certainly a mistake, not a request for an anonymous
+        // commit.
+        let env_some = |k: &str| env(k).filter(|v| !v.is_empty());
+        let arg = |v: Option<String>| v.filter(|s| !s.is_empty());
+        let an = arg(author_name).or_else(|| env_some("GIT_AUTHOR_NAME"));
+        let ae = arg(author_email).or_else(|| env_some("GIT_AUTHOR_EMAIL"));
+        let mut cn = arg(committer_name).or_else(|| env_some("GIT_COMMITTER_NAME"));
+        let mut ce = arg(committer_email).or_else(|| env_some("GIT_COMMITTER_EMAIL"));
+
+        // Layer 2: each side must be both-set or both-unset. Validate BEFORE
+        // cascading so a half-set author doesn't poison the committer side.
+        if an.is_some() != ae.is_some() {
+            return Err(ClientError::Api(
+                "author requires both author_name and author_email (or omit both, \
+                 including any GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL env vars)"
+                    .into(),
+            ));
+        }
+        if cn.is_some() != ce.is_some() {
+            return Err(ClientError::Api(
+                "committer requires both committer_name and committer_email (or omit both, \
+                 including any GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL env vars)"
+                    .into(),
+            ));
+        }
+
+        // Layer 3: cascade author -> committer when committer is fully unset.
+        // Without this, setting only GIT_AUTHOR_* leaves the committer slot
+        // unset and GitHub stamps it with the OAuth user — re-introducing the
+        // exact "wrong-name in commit metadata" bug this resolver exists to fix.
+        if cn.is_none() && ce.is_none() && an.is_some() {
+            cn = an.clone();
+            ce = ae.clone();
+        }
+
+        // Layer 4: hard-refusal flag for deployments that want to guarantee
+        // no commit ever falls back to the OAuth user.
+        let require = env("KP_GITHUB_REQUIRE_AUTHOR")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "True" | "Yes"))
+            .unwrap_or(false);
+        if require && an.is_none() {
+            return Err(ClientError::Api(
+                "KP_GITHUB_REQUIRE_AUTHOR is set but no commit author resolved. \
+                 Pass author_name+author_email as tool args, or set GIT_AUTHOR_NAME \
+                 and GIT_AUTHOR_EMAIL in the MCP server's env."
+                    .into(),
+            ));
+        }
+
+        Ok(Self {
+            author_name: an,
+            author_email: ae,
+            committer_name: cn,
+            committer_email: ce,
+        })
+    }
+
+    /// Borrow as a `CommitIdentity<'_>` suitable for passing into the commit-
+    /// creating functions in this module.
+    pub fn as_borrowed(&self) -> CommitIdentity<'_> {
+        CommitIdentity {
+            author_name: self.author_name.as_deref(),
+            author_email: self.author_email.as_deref(),
+            committer_name: self.committer_name.as_deref(),
+            committer_email: self.committer_email.as_deref(),
+        }
+    }
+}
+
 /// Get file or directory contents from a repository.
 ///
 /// Returns file content (base64-encoded) and metadata, or directory listing.
@@ -781,6 +907,193 @@ mod tests {
             &client, "o", "r", "f.txt", "SGVsbG8=", "add", "main", None, &identity,
         ).await.unwrap_err().to_string();
         assert!(err.contains("author_name") && err.contains("author_email"), "{err}");
+    }
+
+    // --- OwnedCommitIdentity (env-var resolver) tests ---
+    //
+    // All tests use `resolve_with_env` and a closure-based stub so they do not
+    // mutate the real process environment (which would race against parallel
+    // cargo-test threads).
+
+    fn env_map<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        // Capture pairs by ref; closure returns owned String to match env::var.
+        move |k: &str| pairs.iter().find(|(kk, _)| *kk == k).map(|(_, v)| (*v).to_string())
+    }
+
+    #[test]
+    fn owned_identity_all_unset_resolves_to_all_none() {
+        let id = OwnedCommitIdentity::resolve_with_env(None, None, None, None, env_map(&[])).unwrap();
+        assert!(id.author_name.is_none() && id.author_email.is_none());
+        assert!(id.committer_name.is_none() && id.committer_email.is_none());
+    }
+
+    #[test]
+    fn owned_identity_caller_args_win_over_env() {
+        // Caller passed "jw"; env says "bot". Caller must win.
+        let id = OwnedCommitIdentity::resolve_with_env(
+            Some("jw".into()), Some("jw@x".into()), None, None,
+            env_map(&[("GIT_AUTHOR_NAME", "bot"), ("GIT_AUTHOR_EMAIL", "bot@x")]),
+        ).unwrap();
+        assert_eq!(id.author_name.as_deref(), Some("jw"));
+        assert_eq!(id.author_email.as_deref(), Some("jw@x"));
+    }
+
+    #[test]
+    fn owned_identity_env_fills_when_caller_unset() {
+        let id = OwnedCommitIdentity::resolve_with_env(
+            None, None, None, None,
+            env_map(&[("GIT_AUTHOR_NAME", "jw"), ("GIT_AUTHOR_EMAIL", "jw@example.com")]),
+        ).unwrap();
+        assert_eq!(id.author_name.as_deref(), Some("jw"));
+        assert_eq!(id.author_email.as_deref(), Some("jw@example.com"));
+        // committer cascades from author
+        assert_eq!(id.committer_name.as_deref(), Some("jw"));
+        assert_eq!(id.committer_email.as_deref(), Some("jw@example.com"));
+    }
+
+    #[test]
+    fn owned_identity_env_fills_individual_missing_field() {
+        // Caller passed name; env supplies email. Resolver should complete the pair.
+        let id = OwnedCommitIdentity::resolve_with_env(
+            Some("jw".into()), None, None, None,
+            env_map(&[("GIT_AUTHOR_EMAIL", "jw@example.com")]),
+        ).unwrap();
+        assert_eq!(id.author_name.as_deref(), Some("jw"));
+        assert_eq!(id.author_email.as_deref(), Some("jw@example.com"));
+    }
+
+    #[test]
+    fn owned_identity_committer_env_overrides_cascade() {
+        // When committer env is set, it must NOT be cascaded over by author.
+        let id = OwnedCommitIdentity::resolve_with_env(
+            None, None, None, None,
+            env_map(&[
+                ("GIT_AUTHOR_NAME", "jw"), ("GIT_AUTHOR_EMAIL", "jw@x"),
+                ("GIT_COMMITTER_NAME", "bot"), ("GIT_COMMITTER_EMAIL", "bot@x"),
+            ]),
+        ).unwrap();
+        assert_eq!(id.author_name.as_deref(), Some("jw"));
+        assert_eq!(id.committer_name.as_deref(), Some("bot"));
+        assert_eq!(id.committer_email.as_deref(), Some("bot@x"));
+    }
+
+    #[test]
+    fn owned_identity_half_set_author_errors_even_with_no_env() {
+        let err = OwnedCommitIdentity::resolve_with_env(
+            Some("jw".into()), None, None, None, env_map(&[]),
+        ).unwrap_err().to_string();
+        assert!(err.contains("author_name") && err.contains("author_email"), "{err}");
+    }
+
+    #[test]
+    fn owned_identity_half_set_committer_after_env_errors() {
+        // Caller passes committer_email; env provides nothing else.
+        let err = OwnedCommitIdentity::resolve_with_env(
+            None, None, None, Some("bot@x".into()), env_map(&[]),
+        ).unwrap_err().to_string();
+        assert!(err.contains("committer_name") && err.contains("committer_email"), "{err}");
+    }
+
+    #[test]
+    fn owned_identity_empty_env_string_is_treated_as_unset() {
+        // An exported-but-empty env var must not produce {"name":"", "email":""}.
+        let id = OwnedCommitIdentity::resolve_with_env(
+            None, None, None, None,
+            env_map(&[("GIT_AUTHOR_NAME", ""), ("GIT_AUTHOR_EMAIL", "")]),
+        ).unwrap();
+        assert!(id.author_name.is_none());
+        assert!(id.author_email.is_none());
+    }
+
+    #[test]
+    fn owned_identity_require_flag_errors_when_no_author() {
+        let err = OwnedCommitIdentity::resolve_with_env(
+            None, None, None, None,
+            env_map(&[("KP_GITHUB_REQUIRE_AUTHOR", "1")]),
+        ).unwrap_err().to_string();
+        assert!(err.contains("KP_GITHUB_REQUIRE_AUTHOR"), "{err}");
+        assert!(err.contains("GIT_AUTHOR"), "{err}");
+    }
+
+    #[test]
+    fn owned_identity_require_flag_passes_when_env_set() {
+        let id = OwnedCommitIdentity::resolve_with_env(
+            None, None, None, None,
+            env_map(&[
+                ("KP_GITHUB_REQUIRE_AUTHOR", "true"),
+                ("GIT_AUTHOR_NAME", "jw"), ("GIT_AUTHOR_EMAIL", "jw@x"),
+            ]),
+        ).unwrap();
+        assert_eq!(id.author_name.as_deref(), Some("jw"));
+    }
+
+    #[test]
+    fn owned_identity_require_flag_passes_when_caller_set() {
+        let id = OwnedCommitIdentity::resolve_with_env(
+            Some("jw".into()), Some("jw@x".into()), None, None,
+            env_map(&[("KP_GITHUB_REQUIRE_AUTHOR", "yes")]),
+        ).unwrap();
+        assert_eq!(id.author_name.as_deref(), Some("jw"));
+    }
+
+    #[test]
+    fn owned_identity_require_flag_ignored_when_falsey() {
+        // "0", "false", "no" must NOT enforce the requirement.
+        for v in ["0", "false", "no", "off", ""] {
+            let id = OwnedCommitIdentity::resolve_with_env(
+                None, None, None, None,
+                env_map(&[("KP_GITHUB_REQUIRE_AUTHOR", v)]),
+            );
+            assert!(id.is_ok(), "value {v:?} should not enforce REQUIRE_AUTHOR");
+        }
+    }
+
+    #[test]
+    fn owned_identity_as_borrowed_matches_owned_fields() {
+        let id = OwnedCommitIdentity {
+            author_name: Some("jw".into()),
+            author_email: Some("jw@x".into()),
+            committer_name: Some("bot".into()),
+            committer_email: Some("bot@x".into()),
+        };
+        let b = id.as_borrowed();
+        assert_eq!(b.author_name, Some("jw"));
+        assert_eq!(b.author_email, Some("jw@x"));
+        assert_eq!(b.committer_name, Some("bot"));
+        assert_eq!(b.committer_email, Some("bot@x"));
+    }
+
+    #[tokio::test]
+    async fn owned_identity_end_to_end_env_fill_reaches_wire() {
+        // Compose the resolver + create_or_update path: caller passes no author
+        // args, env supplies them, and the resulting GitHub PUT must carry the
+        // env-derived author + cascaded committer in the body.
+        use wiremock::matchers::{body_json, method, path};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/repos/o/r/contents/f.txt"))
+            .and(body_json(json!({
+                "message": "add",
+                "content": "SGVsbG8=",
+                "branch": "main",
+                "author": {"name": "jw", "email": "jw@example.com"},
+                "committer": {"name": "jw", "email": "jw@example.com"}
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"content": {"path": "f.txt"}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let identity = OwnedCommitIdentity::resolve_with_env(
+            None, None, None, None,
+            env_map(&[("GIT_AUTHOR_NAME", "jw"), ("GIT_AUTHOR_EMAIL", "jw@example.com")]),
+        ).unwrap();
+        let client = GithubClient::http_with_base_url(&server.uri(), "test-token");
+        let result = create_or_update(
+            &client, "o", "r", "f.txt", "SGVsbG8=", "add", "main", None,
+            &identity.as_borrowed(),
+        ).await;
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]
