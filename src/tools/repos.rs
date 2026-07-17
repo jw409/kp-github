@@ -83,6 +83,74 @@ pub async fn compare(
     Ok(result)
 }
 
+/// Compressed branch-vs-base status — the "is this branch still relevant?"
+/// signal for worktree / branch tracking.
+///
+/// Returns just the verdict (`status`, `ahead_by`, `behind_by`,
+/// `total_commits`, key SHAs, and a derived `merged_into_base`) instead of the
+/// full `commits[]` / `files[]` arrays a `compare` carries — the difference
+/// between a few dozen tokens and tens of thousands on a long-lived branch.
+/// `base` defaults to the repository's default branch when omitted.
+///
+/// `merged_into_base` is true when `base` already contains every commit on
+/// `branch` (fast-forward, rebase, or merge-commit merges, plus the identical
+/// case: `ahead_by == 0`). It is deliberately NOT set for squash-merges, which
+/// replace the branch's commits with a single new commit on `base` — so the
+/// branch still reads as "ahead". Detect those via a PR's `merged_at`
+/// (`prs_list` / `prs_search head:<branch>`); the two signals are complementary
+/// and together cover branch relevance.
+pub async fn branch_status(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<Value, ClientError> {
+    let base_ref = match base {
+        Some(b) => b.to_string(),
+        None => get(client, owner, repo)
+            .await?
+            .get("default_branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("main")
+            .to_string(),
+    };
+
+    let encoded_base = crate::util::urlencode_path_multi(&base_ref);
+    let encoded_head = crate::util::urlencode_path_multi(branch);
+    let endpoint = format!("/repos/{owner}/{repo}/compare/{encoded_base}...{encoded_head}");
+    let full = client.api(&endpoint, &[]).await?;
+
+    let take = |k: &str| full.get(k).cloned().unwrap_or(Value::Null);
+    let merged_into_base = full.get("ahead_by").and_then(|v| v.as_u64()).map(|a| a == 0);
+    // Head tip is the last commit unique to `branch`; empty when nothing is
+    // ahead of base, in which case the caller already holds the local sha.
+    let head_sha = full
+        .get("commits")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.last())
+        .and_then(|c| c.get("sha"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    // Named base_ref/head_ref (not base/head): the generic compressor flattens
+    // any "base"/"head" key as a GitHub ref *object*, which silently drops a
+    // plain string. base_ref/head_ref pass through untouched (same as prs).
+    Ok(serde_json::json!({
+        "base_ref": base_ref,
+        "head_ref": branch,
+        "status": take("status"),
+        "ahead_by": take("ahead_by"),
+        "behind_by": take("behind_by"),
+        "total_commits": take("total_commits"),
+        "merged_into_base": merged_into_base,
+        "base_sha": full.pointer("/base_commit/sha").cloned().unwrap_or(Value::Null),
+        "merge_base_sha": full.pointer("/merge_base_commit/sha").cloned().unwrap_or(Value::Null),
+        "head_sha": head_sha,
+        "html_url": take("html_url"),
+    }))
+}
+
 /// Fork a repository.
 ///
 /// If `org` is provided, forks into that organization.

@@ -364,42 +364,112 @@ async fn test_users_search() {
     assert!(!McpClient::is_error(&resp));
 }
 
+/// Per-endpoint compression floors, measured against `gh api` raw responses on
+/// a public repo (cli/cli). Byte-based: the byte ratio tracks the token ratio
+/// ~1:1 because the compression is structural (dropped fields), not
+/// tokenizer-dependent — see `scripts/bench_tokens.py` for the true-token table.
+/// Fails if a change regresses compression on any hot read path.
+///
+///   cargo test --test live_integration test_compression_floors -- --ignored --nocapture
 #[tokio::test]
 #[ignore]
-async fn test_compression_ratio() {
-    // Verify compression actually saves tokens
+async fn test_compression_floors() {
+    let mut client = McpClient::new().await;
+    // (label, tool, args, gh api path, min byte ratio)
+    let cases: Vec<(&str, &str, Value, &str, f64)> = vec![
+        (
+            "issues_list(5)",
+            "github_issues_list",
+            json!({"owner": "cli", "repo": "cli", "state": "open", "limit": 5}),
+            "/repos/cli/cli/issues?state=open&per_page=5",
+            4.0,
+        ),
+        (
+            "prs_list(5)",
+            "github_prs_list",
+            json!({"owner": "cli", "repo": "cli", "state": "open", "limit": 5}),
+            "/repos/cli/cli/pulls?state=open&per_page=5",
+            8.0,
+        ),
+        (
+            "compare(default)",
+            "github_repos_compare",
+            json!({"owner": "cli", "repo": "cli", "base": "trunk~30", "head": "trunk"}),
+            "/repos/cli/cli/compare/trunk~30...trunk",
+            3.0,
+        ),
+    ];
+
+    eprintln!("\n{:<18}{:>10}{:>10}{:>9}", "endpoint", "raw_B", "comp_B", "ratio");
+    for (label, tool, args, path, floor) in cases {
+        let resp = client.tool_call(tool, args).await;
+        assert!(!McpClient::is_error(&resp), "{label} errored: {resp:?}");
+        let comp = McpClient::get_text(&resp).len().max(1);
+        let raw = tokio::process::Command::new("gh")
+            .args(["api", path])
+            .output()
+            .await
+            .unwrap()
+            .stdout
+            .len();
+        let ratio = raw as f64 / comp as f64;
+        eprintln!("{label:<18}{raw:>10}{comp:>10}{ratio:>8.1}x");
+        assert!(ratio >= floor, "{label}: compression {ratio:.1}x < floor {floor:.1}x");
+    }
+}
+
+/// The branch-tracking half: `github_branch_status` returns a compressed
+/// merged/ahead/behind verdict (with a derived `merged_into_base`) instead of a
+/// full compare's commit + file arrays. Its output is bounded to a handful of
+/// scalars regardless of how far the branch has diverged — that boundedness is
+/// the point, so the win over a raw compare grows with divergence.
+#[tokio::test]
+#[ignore]
+async fn test_branch_status_is_compact_and_correct() {
     let mut client = McpClient::new().await;
 
-    // Get compressed output
-    let resp = client
+    // Merged direction: trunk~30 is fully contained in trunk -> merged_into_base.
+    let merged = client
         .tool_call(
-            "github_issues_list",
-            json!({
-                "owner": "anthropics", "repo": "claude-code", "state": "open", "limit": 5
-            }),
+            "github_branch_status",
+            json!({"owner": "cli", "repo": "cli", "branch": "trunk~30", "base": "trunk", "format": "json"}),
         )
         .await;
-    let compressed = McpClient::get_text(&resp);
-    let comp_len = compressed.len();
+    assert!(!McpClient::is_error(&merged), "branch_status errored: {merged:?}");
+    let mtext = McpClient::get_text(&merged);
+    let mv: Value = serde_json::from_str(mtext).expect("branch_status must be valid json");
+    assert_eq!(mv["merged_into_base"], json!(true), "trunk~30 should be contained in trunk: {mv}");
+    // Bounded output: a fixed set of scalars, never the commit/file arrays.
+    assert!(mtext.len() < 600, "branch_status should be bounded, got {}B: {mtext}", mtext.len());
 
-    // Get raw via gh CLI for comparison
-    let raw = tokio::process::Command::new("gh")
-        .args(["api", "/repos/anthropics/claude-code/issues?state=open&per_page=5"])
-        .output()
-        .await
-        .unwrap();
-    let raw_len = raw.stdout.len();
+    // Ahead direction: trunk has 30 commits trunk~30 lacks -> not merged, and the
+    // full compare balloons while branch_status stays flat (the real win).
+    let ahead = client
+        .tool_call(
+            "github_branch_status",
+            json!({"owner": "cli", "repo": "cli", "branch": "trunk", "base": "trunk~30", "format": "json"}),
+        )
+        .await;
+    let av: Value = serde_json::from_str(McpClient::get_text(&ahead)).expect("valid json");
+    assert_eq!(av["merged_into_base"], json!(false), "trunk is ahead of trunk~30: {av}");
+    assert!(av["ahead_by"].as_u64().unwrap_or(0) >= 1, "expected commits ahead: {av}");
+    // Ref names must survive compression — regression guard for the pipeline
+    // eating "base"/"head" as ref-objects (hence base_ref/head_ref).
+    assert_eq!(av["base_ref"], json!("trunk~30"), "base_ref dropped by compressor: {av}");
+    assert_eq!(av["head_ref"], json!("trunk"), "head_ref dropped by compressor: {av}");
 
-    let ratio = raw_len as f64 / comp_len as f64;
-    eprintln!(
-        "Compression ratio: {:.1}x ({} -> {} chars)",
-        ratio, raw_len, comp_len
-    );
-    assert!(
-        ratio > 3.0,
-        "Expected at least 3x compression, got {:.1}x",
-        ratio
-    );
+    let bs_len = McpClient::get_text(&ahead).len();
+    let cmp_len = McpClient::get_text(
+        &client
+            .tool_call(
+                "github_repos_compare",
+                json!({"owner": "cli", "repo": "cli", "base": "trunk~30", "head": "trunk"}),
+            )
+            .await,
+    )
+    .len();
+    eprintln!("branch_status={bs_len}B  full_compare={cmp_len}B  ratio={:.0}x", cmp_len as f64 / bs_len.max(1) as f64);
+    assert!(bs_len * 20 < cmp_len, "branch_status not compact vs a diverged compare: {bs_len}B vs {cmp_len}B");
 }
 
 #[tokio::test]
