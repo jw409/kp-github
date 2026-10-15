@@ -1,0 +1,73 @@
+name: Consumer Packages
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/package_consumer.py'
+      - 'scripts/github_events_setup.py'
+      - 'docs/**'
+      - 'examples/github-events/**'
+      - 'tests/test_consumer_package.py'
+      - 'tests/smoke_consumer.py'
+      - '.github/workflows/consumer-package.yml'
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_MIN_STACK: 16777216
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: consumer-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+      - name: Build the checked-out source
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Smoke test the native binary without live credentials
+        run: python3 tests/smoke_consumer.py --binary target/${{ matrix.target }}/release/kp-github-mcp
+      - name: Package binary, setup helper, and documentation
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 scripts/package_consumer.py \
+            --binary target/${{ matrix.target }}/release/kp-github-mcp \
+            --target ${{ matrix.target }} \
+            --source-root . --output-dir dist \
+            --expect-commit "$SOURCE_COMMIT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: consumer-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error

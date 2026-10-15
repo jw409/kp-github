@@ -1,0 +1,92 @@
+{
+  "kind": "kp-github-receiver-infrastructure-inputs-sample",
+  "schema_version": 1,
+  "sample_only": true,
+  "status": "INPUT_CONTRACT_ONLY_NOT_DEPLOYABLE_TERRAFORM",
+  "github_app": {
+    "owner": "Meshlyai",
+    "app_id": 5327950,
+    "app_slug": "meshly-open-source-dev-events",
+    "allowed_installations": [
+      {"organization": "Meshlyai", "installation_id": 171660780},
+      {"organization": "Meshly-Open-Source", "installation_id": 171660834}
+    ],
+    "webhook_events": [
+      "check_run", "check_suite", "pull_request", "pull_request_review", "status", "workflow_run"
+    ],
+    "repository_permissions": {
+      "actions": "read",
+      "checks": "read",
+      "metadata": "read",
+      "pull_requests": "read",
+      "statuses": "read"
+    }
+  },
+  "gcp": {
+    "project_id": "meshly-github-runners",
+    "region": "us-central1",
+    "existing_dispatcher": {
+      "name": "webhook-dispatcher",
+      "resource_kind": "cloud-functions-gen2",
+      "ownership": "EXISTING_RECEIVER_OWNER"
+    }
+  },
+  "proposed_secret_manager_references": {
+    "app_private_key": {
+      "project_id": "meshly-github-runners",
+      "secret_id": "github-events-app-private-key",
+      "version": "TO_BE_PROVISIONED"
+    },
+    "webhook_secret": {
+      "project_id": "meshly-github-runners",
+      "secret_id": "github-events-webhook-secret",
+      "version": "TO_BE_PROVISIONED"
+    }
+  },
+  "production_bootstrap_object": {
+    "bucket_name": "meshly-corp-tool-configs",
+    "object_name": "everyone/github-events-config-key",
+    "status": "PROPOSED_NOT_PUBLISHED_BY_THIS_SAMPLE",
+    "content_type": "text/plain; charset=utf-8",
+    "cache_control": "no-store"
+  },
+  "required_shared_config_outputs": {
+    "endpoint": "TO_BE_PROVISIONED_CONSUMER_API_HTTPS_ENDPOINT",
+    "audience": "TO_BE_PROVISIONED_ACTUAL_GOOGLE_ID_TOKEN_AUDIENCE",
+    "allowed_orgs": ["Meshlyai", "Meshly-Open-Source"],
+    "app_slug": "meshly-open-source-dev-events"
+  },
+  "developer_authorization_records": [
+    {
+      "status": "DISABLED_SAMPLE_ONLY_NOT_AN_ACCESS_GRANT",
+      "google_identity": {
+        "issuer": "https://accounts.google.com",
+        "subject": "ILLUSTRATIVE_GOOGLE_SUBJECT_NOT_A_PRINCIPAL"
+      },
+      "github_identity": {
+        "user_id": "ILLUSTRATIVE_STABLE_GITHUB_NUMERIC_USER_ID",
+        "login": "ILLUSTRATIVE_GITHUB_LOGIN"
+      },
+      "allowed_scopes": [
+        {"organization": "Meshlyai", "repositories": ["ILLUSTRATIVE_REPOSITORY_NAME"]},
+        {"organization": "Meshly-Open-Source", "repositories": ["ILLUSTRATIVE_REPOSITORY_NAME"]}
+      ],
+      "authorization_evidence": {
+        "source": "TO_BE_PROVISIONED_VERIFIED_LINK_OR_APPROVED_OPERATOR_RECORD",
+        "record_reference": "TO_BE_PROVISIONED",
+        "verified_at": "TO_BE_PROVISIONED"
+      }
+    }
+  ],
+  "future_organization_policy": "Require an explicit App installation allowlist entry and explicitly approved organization/repository scopes; never infer grants from the local profile.",
+  "receiver_owner_requirements": [
+    "Author Terraform in the authoritative existing infrastructure state; this file creates no resources.",
+    "Provision dedicated app-secret references without overwriting existing runner App secrets.",
+    "Replace each TO_BE_PROVISIONED secret version with an explicit numeric version; never latest.",
+    "Keep App signing material and webhook secrets on the receiver side; never put them in developer configuration.",
+    "Publish production shared configuration only after the consumer API and identity mapping are usable.",
+    "Use the actual emitted Google token audience accepted by receiver verification; do not assume it equals the endpoint.",
+    "Bind a cryptographically verified Google issuer/subject to a stable GitHub user ID and login through verified linking or an approved operator record; local profile names are not proof.",
+    "Replace the disabled illustrative authorization record with independently verified records and explicit organization/repository scopes; do not interpret placeholder identities as deployable grants."
+  ]
+}

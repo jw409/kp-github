@@ -37,8 +37,8 @@ pub enum ClientError {
 enum Backend {
     /// Direct HTTP via reqwest (fast, no subprocess)
     Http { client: reqwest::Client, token: String },
-    /// Fallback to `gh` CLI (slower, but handles auth edge cases)
-    GhCli,
+    /// Fallback to `gh` CLI, pinned to the token selected at startup.
+    GhCli { token: String },
     /// Mock backend for testing — returns canned responses in order
     #[cfg(test)]
     Mock {
@@ -56,8 +56,8 @@ const GITHUB_API: &str = "https://api.github.com";
 impl GithubClient {
     pub fn new(token: &str) -> Self {
         if token.is_empty() {
-            tracing::info!("No token provided, using gh CLI fallback");
-            return Self { backend: Backend::GhCli, base_url: GITHUB_API.to_string() };
+            tracing::warn!("No selected GitHub token; API calls will fail until credentials are configured");
+            return Self { backend: Backend::GhCli { token: token.to_string() }, base_url: GITHUB_API.to_string() };
         }
 
         match reqwest::Client::builder()
@@ -78,7 +78,7 @@ impl GithubClient {
             }
             Err(e) => {
                 tracing::warn!("Failed to build HTTP client: {e}, falling back to gh CLI");
-                Self { backend: Backend::GhCli, base_url: GITHUB_API.to_string() }
+                Self { backend: Backend::GhCli { token: token.to_string() }, base_url: GITHUB_API.to_string() }
             }
         }
     }
@@ -150,7 +150,7 @@ impl GithubClient {
                         return Ok(serde_json::from_str(&text)?);
                     }
                 }
-                Backend::GhCli => self.gh_cli_api(endpoint, args).await,
+                Backend::GhCli { .. } => self.gh_cli_api(endpoint, args).await,
                 #[cfg(test)]
                 Backend::Mock { responses } => {
                     let mut q = responses.lock().unwrap();
@@ -238,7 +238,7 @@ impl GithubClient {
 
                 Ok(Value::Array(all_items))
             }
-            Backend::GhCli => {
+            Backend::GhCli { .. } => {
                 // gh CLI handles pagination natively with --paginate
                 if effective_limit > 100 {
                     let args = vec![
@@ -247,8 +247,8 @@ impl GithubClient {
                     ];
                     // Build the URL with query params
                     let full_url = url.clone();
-                    let mut cmd = tokio::process::Command::new("gh");
-                    cmd.args(["api", &full_url]);
+                    let mut cmd = self.gh_cli_command()?;
+                    cmd.arg(&full_url);
                     cmd.args(&args);
                     cmd.stdin(std::process::Stdio::null());
 
@@ -261,7 +261,7 @@ impl GithubClient {
                     .map_err(|e| ClientError::Cli(e.to_string()))?;
                     if !output.status.success() {
                         let stderr = String::from_utf8_lossy(&output.stderr);
-                        return Err(ClientError::Api(stderr.to_string()));
+                        return Err(self.gh_cli_error(&stderr));
                     }
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     if stdout.trim().is_empty() {
@@ -374,12 +374,12 @@ impl GithubClient {
                 }
                 Ok(serde_json::from_str(&text)?)
             }
-            Backend::GhCli => {
+            Backend::GhCli { .. } => {
                 // Serialize body to JSON string and pass via --input
                 let body_str = serde_json::to_string(body)
                     .map_err(|e| ClientError::Cli(format!("JSON serialize: {e}")))?;
-                let mut cmd = tokio::process::Command::new("gh");
-                cmd.args(["api", endpoint, "-X", method, "--input", "-"]);
+                let mut cmd = self.gh_cli_command()?;
+                cmd.args([endpoint, "-X", method, "--input", "-"]);
                 cmd.stdin(std::process::Stdio::piped());
                 cmd.stdout(std::process::Stdio::piped());
                 cmd.stderr(std::process::Stdio::piped());
@@ -411,7 +411,7 @@ impl GithubClient {
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(ClientError::Api(stderr.to_string()));
+                    return Err(self.gh_cli_error(&stderr));
                 }
 
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -463,10 +463,10 @@ impl GithubClient {
                     Err(e) => Err(e),
                 }
             }
-            Backend::GhCli => {
+            Backend::GhCli { .. } => {
                 let accept_header = format!("Accept:{accept}");
-                let mut cmd = tokio::process::Command::new("gh");
-                cmd.args(["api", endpoint, "--header", &accept_header]);
+                let mut cmd = self.gh_cli_command()?;
+                cmd.args([endpoint, "--header", &accept_header]);
                 cmd.stdin(std::process::Stdio::null());
 
                 let output = tokio::time::timeout(
@@ -479,7 +479,7 @@ impl GithubClient {
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(ClientError::Api(stderr.to_string()));
+                    return Err(self.gh_cli_error(&stderr));
                 }
 
                 Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -488,10 +488,45 @@ impl GithubClient {
         }).await
     }
 
+    /// Every fallback path uses this command so ambient gh identity cannot
+    /// differ from the direct HTTP identity. Dropping a timed-out subprocess
+    /// kills it instead of leaving an API write running in the background.
+    fn gh_cli_command(&self) -> Result<tokio::process::Command, ClientError> {
+        let Backend::GhCli { token } = &self.backend else {
+            return Err(ClientError::Cli(
+                "gh fallback is unavailable for this backend".into(),
+            ));
+        };
+        if token.is_empty() {
+            return Err(ClientError::Cli(
+                "no selected GitHub token; resolve credentials before making API calls".into(),
+            ));
+        }
+        let mut cmd = tokio::process::Command::new("gh");
+        cmd.env("GH_TOKEN", token)
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_HOST")
+            .env_remove("GH_DEBUG")
+            .env("GH_PROMPT_DISABLED", "1")
+            .kill_on_drop(true);
+        // The HTTP backend targets github.com. Pin the CLI host too, including
+        // when gh's stored default account belongs to another host.
+        cmd.args(["api", "--hostname", "github.com"]);
+        Ok(cmd)
+    }
+
+    fn gh_cli_error(&self, stderr: &str) -> ClientError {
+        let message = match &self.backend {
+            Backend::GhCli { token } if !token.is_empty() => stderr.replace(token, "[REDACTED]"),
+            _ => stderr.to_owned(),
+        };
+        ClientError::Api(message)
+    }
+
     /// gh CLI fallback
     async fn gh_cli_api(&self, endpoint: &str, args: &[&str]) -> Result<Value, ClientError> {
-        let mut cmd = tokio::process::Command::new("gh");
-        cmd.args(["api", endpoint]);
+        let mut cmd = self.gh_cli_command()?;
+        cmd.arg(endpoint);
         for arg in args {
             cmd.arg(arg);
         }
@@ -508,7 +543,7 @@ impl GithubClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ClientError::Api(stderr.to_string()));
+            return Err(self.gh_cli_error(&stderr));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -839,12 +874,163 @@ mod tests {
         assert_eq!(result["body"], "hello world & goodbye");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_fallback_keeps_selected_identity_for_every_operation() {
+        const CHILD_MARKER: &str = "KP_TEST_GITHUB_IDENTITY_CHILD";
+        if std::env::var(CHILD_MARKER).ok().as_deref() != Some("1") {
+            use std::os::unix::fs::PermissionsExt;
+            // The subprocess has only synthetic credentials. This isolates the
+            // public environment-based auth entrypoint without changing this
+            // test runner's environment or touching the real gh configuration.
+            let directory = std::env::temp_dir().join(format!(
+                "kp-github-identity-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+            struct Cleanup(std::path::PathBuf);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
+            let _cleanup = Cleanup(directory.clone());
+            let program = directory.join("gh");
+            std::fs::write(
+                &program,
+                r##"#!/bin/sh
+if [ "$1" = auth ]; then
+    test "$1 $2 $3 $4 $5" = 'auth token --hostname github.com --user' || exit 11
+    test -z "${GH_TOKEN+x}${GITHUB_TOKEN+x}${GH_HOST+x}${GH_DEBUG+x}" || exit 12
+    case "$6" in
+        jw409) printf 'synthetic-selected-token\n'; exit 0 ;;
+        missing-account) printf 'synthetic-private-error' >&2; exit 1 ;;
+        empty-account) exit 0 ;;
+        *) exit 18 ;;
+    esac
+fi
+test "$1 $2 $3" = 'api --hostname github.com' || exit 13
+test "$GH_TOKEN" = synthetic-selected-token || exit 14
+test -z "${GITHUB_TOKEN+x}${GH_HOST+x}${GH_DEBUG+x}" || exit 15
+test "$GH_PROMPT_DISABLED" = 1 || exit 16
+case "$4" in
+    /list*) printf '[[{"selected":true}]]' ;;
+    /json) cat >/dev/null; printf '{"selected":true}' ;;
+    /raw) printf 'selected raw output' ;;
+    /failure*) printf '%s' "$GH_TOKEN" >&2; exit 1 ;;
+    /api) printf '{"selected":true}' ;;
+    *) exit 17 ;;
+esac
+"##,
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            for account in ["jw409", "missing-account", "empty-account"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "github::client::tests::cli_fallback_keeps_selected_identity_for_every_operation", "--nocapture"])
+                    .env_clear()
+                    .env(CHILD_MARKER, "1")
+                    .env("PATH", format!("{}:/usr/bin:/bin", directory.display()))
+                    .env("KP_GITHUB_ACCOUNT", account)
+                    .env("GH_TOKEN", "synthetic-wrong-gh")
+                    .env("GITHUB_TOKEN", "synthetic-wrong-github")
+                    .env("GH_HOST", "wrong.example")
+                    .env("GH_DEBUG", "api")
+                    .output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "isolated synthetic child failed: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+
+        let result = crate::auth::resolve_token_for_account(Some("jw408"));
+        if std::env::var("KP_GITHUB_ACCOUNT").unwrap() != "jw409" {
+            assert!(matches!(result, Err(crate::auth::AuthError::SelectedAccountMissing)));
+            return;
+        }
+        let token = result.unwrap();
+        assert_eq!(token, "synthetic-selected-token");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer synthetic-selected-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"selected": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let http = GithubClient::http_with_base_url(&server.uri(), &token);
+        assert_eq!(
+            http.api("/api", &[]).await.unwrap(),
+            json!({"selected": true})
+        );
+        let cli = GithubClient {
+            backend: Backend::GhCli { token },
+            base_url: GITHUB_API.into(),
+        };
+        assert_eq!(
+            cli.api("/api", &[]).await.unwrap(),
+            json!({"selected": true})
+        );
+        assert_eq!(
+            cli.api_list("/list", &[], Some(101)).await.unwrap(),
+            json!([{"selected": true}])
+        );
+        assert_eq!(
+            cli.api_json("/json", "POST", &json!({"input": true}))
+                .await
+                .unwrap(),
+            json!({"selected": true})
+        );
+        assert_eq!(
+            cli.api_raw("/raw", "text/plain").await.unwrap(),
+            "selected raw output"
+        );
+        for error in [
+            cli.api("/failure", &[]).await.unwrap_err(),
+            cli.api_list("/failure", &[], Some(101)).await.unwrap_err(),
+            cli.api_json("/failure", "POST", &json!({}))
+                .await
+                .unwrap_err(),
+            cli.api_raw("/failure", "text/plain").await.unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("[REDACTED]"));
+            assert!(!error.to_string().contains("synthetic-selected-token"));
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_selected_token_cannot_fall_back_to_ambient_credentials() {
+        let client = GithubClient::new("");
+        for error in [
+            client.api("/api", &[]).await.unwrap_err(),
+            client.api_list("/list", &[], Some(101)).await.unwrap_err(),
+            client
+                .api_json("/json", "POST", &json!({}))
+                .await
+                .unwrap_err(),
+            client.api_raw("/raw", "text/plain").await.unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("no selected GitHub token"));
+        }
+    }
+
     #[test]
     fn test_github_client_new_empty_token() {
-        // Empty token should create GhCli backend (no panic)
+        // Empty tokens construct safely, but API calls fail closed.
         let client = GithubClient::new("");
-        // Can't easily test internal backend, but construction shouldn't panic
-        drop(client);
+        assert!(matches!(client.backend, Backend::GhCli { token } if token.is_empty()));
     }
 
     #[test]

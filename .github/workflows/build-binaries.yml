@@ -9,6 +9,9 @@ on:
 env:
   RUST_MIN_STACK: 16777216
 
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:
@@ -30,7 +33,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -39,15 +42,20 @@ jobs:
           path: target/${{ matrix.target }}/release/kp-github-mcp
 
   commit-binaries:
+    # Marketplace binaries are published only by an intentional main dispatch.
+    # A tag or feature-branch build must never replace main's checked-in binaries.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      # Tag-triggered runs land in detached HEAD; we need to be ON main to push.
+      # Commit atop the exact source that produced these artifacts. If main
+      # advances during the build, the non-forced push fails instead of rebasing
+      # old binaries onto newer source.
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@v4
@@ -73,6 +81,5 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "build: update pre-built binaries [skip ci]"
-            git pull --rebase origin main
-            git push
+            git push origin HEAD:main
           fi
