@@ -6,24 +6,28 @@ connect directly to it without starting a per-session proxy. Claude Code support
 this transport: https://code.claude.com/docs/en/mcp#option-1-add-a-remote-http-server .
 
 Each connection initializes its own MCP session. Request IDs, cancellation and
-session deletion stay separate. The GitHub HTTP client/connection pool, selected
-credential, optional event client/token cache and usage-log handle are shared.
+session deletion stay separate. The GitHub HTTP client/connection pool, per-account
+credentials, optional event clients/token caches and usage-log handle are shared.
 No GitHub response cache is added. Token expiry/401 refresh remains unchanged.
 A missing transport session returns 404 so it does not invalidate valid credentials.
 
 ## Account and configuration boundary
 
-One daemon has one selected GitHub account, events profile, Google identity,
-commit-author defaults and usage sink. These come from the daemon's environment,
-not each connecting Claude process. Explicit tool-level commit-author arguments
-still override the daemon's defaults. Listener cursors and acknowledgement tokens
-remain explicit tool arguments; sharing transport does not acknowledge events.
+A daemon can serve multiple explicitly enabled GitHub accounts and organizations.
+Use the registry and per-request `github_account` selector in
+[account selection](account-selection.md). Clients, credentials and event token
+caches are separate per account; each request gets an immutable account scope.
+There is no shared mutable active-account selector. A missing credential or bad
+event profile affects only the selected account's request/feature.
 
-Use the same daemon only for sessions intentionally sharing that configuration.
-Different account/profile combinations need separate endpoints/processes in this
-implementation. A local bearer key grants the daemon's GitHub authority, including
-its write tools; it is distinct from GitHub, Google and App credentials. Possession
-of that key is the local access boundary, not an asserted username header.
+The daemon's environment supplies configuration, commit-author defaults and the
+usage sink. Tool-level commit-author arguments still override those defaults.
+Listener cursors and acknowledgement tokens remain explicit tool arguments;
+sharing transport does not acknowledge events.
+
+A local bearer key grants all accounts explicitly enabled on that daemon,
+including their write tools. It is distinct from GitHub, Google and App
+credentials. Only sessions intended to share that authority should share a key.
 
 ## Prepare and run
 

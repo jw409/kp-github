@@ -6,6 +6,10 @@ on:
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/binary_provenance.py'
+      - 'bin/**'
+      - 'tests/test_binary_provenance.py'
       - 'scripts/package_consumer.py'
       - 'scripts/github_events_setup.py'
       - 'scripts/setup_shared_http.py'
@@ -44,9 +48,11 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          toolchain: 1.99.0
       - uses: actions/cache@v4
         with:
           path: |
@@ -55,7 +61,7 @@ jobs:
             target
           key: consumer-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
       - name: Build the checked-out source
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        run: python3 scripts/binary_provenance.py build --target ${{ matrix.target }} --output target/${{ matrix.target }}/release/kp-github-mcp
       - name: Smoke test the native binary without live credentials
         run: python3 tests/smoke_consumer.py --binary target/${{ matrix.target }}/release/kp-github-mcp
       - name: Smoke shared local server

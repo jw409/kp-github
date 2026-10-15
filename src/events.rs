@@ -68,22 +68,12 @@ pub struct EventsConfig {
 }
 
 impl EventsConfig {
-    /// An absent default profile disables the feature. An explicitly named or
-    /// existing invalid profile is an error, never a reason to switch identities.
+    /// Profiles are opt-in. A file appearing under HOME must not change startup.
     pub fn from_environment() -> Result<Option<Self>, EventsError> {
-        if let Some(path) = std::env::var_os("KP_GITHUB_EVENTS_CONFIG") {
-            if path.is_empty() {
-                return Err(EventsError::Config("KP_GITHUB_EVENTS_CONFIG is empty"));
-            }
-            return Self::from_path(&PathBuf::from(path)).map(Some);
-        }
-        let Some(home) = std::env::var_os("HOME") else {
-            return Ok(None);
-        };
-        let path = PathBuf::from(home).join(".config/kp-github/events.json");
-        match Self::from_path(&path) {
-            Err(EventsError::ConfigIo(std::io::ErrorKind::NotFound)) => Ok(None),
-            other => other.map(Some),
+        match std::env::var_os("KP_GITHUB_EVENTS_CONFIG") {
+            None => Ok(None),
+            Some(path) if path.is_empty() => Err(EventsError::Config("KP_GITHUB_EVENTS_CONFIG is empty")),
+            Some(path) => Self::from_path(&PathBuf::from(path)).map(Some),
         }
     }
 
@@ -279,13 +269,6 @@ pub struct EventsClient {
 }
 
 impl EventsClient {
-    pub fn from_environment() -> Result<Option<Self>, EventsError> {
-        EventsConfig::from_environment()?
-            .map(Self::from_config)
-            .transpose()
-    }
-
-    /// Construction performs no identity or network calls.
     pub fn from_config(config: EventsConfig) -> Result<Self, EventsError> {
         Self::build(config, TokenProvider::Gcloud, false)
     }
@@ -312,11 +295,14 @@ impl EventsClient {
         })
     }
 
-    pub fn github_account(&self) -> &str {
-        &self.config.github_account
+    /// Fake-service constructor, unavailable in production builds.
+    #[cfg(test)]
+    pub(crate) fn with_test_account(endpoint: &str, token: &str, account: &str) -> Self {
+        let mut client = Self::with_test_token(endpoint, token);
+        client.config.github_account = account.to_string();
+        client
     }
 
-    /// Fake-service constructor, unavailable in production builds.
     #[cfg(test)]
     pub(crate) fn with_test_token(endpoint: &str, token: &str) -> Self {
         let config = EventsConfig {
@@ -367,6 +353,7 @@ impl EventsClient {
                 .http
                 .request(method.clone(), url.clone())
                 .bearer_auth(&token)
+                .header("X-KP-GitHub-Account", &self.config.github_account)
                 .header(reqwest::header::ACCEPT, "application/json");
             if let Some(body) = &body {
                 req = req.json(body);

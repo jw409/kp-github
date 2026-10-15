@@ -33,7 +33,7 @@ For one app owned by Meshlyai and installed in both Meshly organizations:
 ```sh
 python3 scripts/register_github_app.py \
   --org 'Meshlyai:jw408:Meshly Developer Events' \
-  --install-org 'Meshly-Open-Source:jw409' \
+  --install-org 'Meshly-Open-Source:jw408' \
   --public \
   --webhook-url 'https://YOUR_MESHLY_RECEIVER' \
   --output-dir "$HOME/.config/kp-github/meshly-app-$(date +%Y%m%d-%H%M%S)"

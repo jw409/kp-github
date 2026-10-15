@@ -7,6 +7,7 @@ import argparse
 import gzip
 import hashlib
 import io
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -16,6 +17,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+
+
+_SPEC = importlib.util.spec_from_file_location("binary_provenance", Path(__file__).with_name("binary_provenance.py"))
+_provenance = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_provenance)
 
 
 REQUIRED_FILES = (
@@ -39,7 +45,7 @@ OPTIONAL_FILES = (
     "examples/github-events/shared-config.schema.json",
     "examples/github-events/receiver-inputs.sample.json",
 )
-SOURCE_PATHS = ("Cargo.toml", "Cargo.lock", "src", "scripts/package_consumer.py",
+SOURCE_PATHS = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "build.rs", ".cargo", "src", "scripts/package_consumer.py",
                 *REQUIRED_FILES, *OPTIONAL_FILES)
 README = """kp-github consumer package
 
@@ -135,6 +141,13 @@ def build_package(binary: Path, target: str, source_root: Path, output_dir: Path
     binary_bytes = binary.read_bytes()
     if not binary_bytes:
         raise PackageError("--binary must not be empty.")
+    # The build helper creates this receipt only after compiling committed source
+    # in a fresh directory. It is integrity metadata, not a cryptographic attestation.
+    try:
+        receipt = json.loads(_provenance.regular(binary.with_suffix(".provenance.json")))
+        _provenance.validate_receipt(root, binary, receipt, target, require_current=True)
+    except (_provenance.ProvenanceError, OSError, ValueError, AttributeError) as error:
+        raise PackageError("A valid current-source build receipt is required: " + str(error)) from None
     payload: dict[str, tuple[bytes, int]] = {
         "bin/kp-github-mcp": (binary_bytes, 0o755),
         "README.txt": (README, 0o644),
@@ -153,7 +166,10 @@ def build_package(binary: Path, target: str, source_root: Path, output_dir: Path
         "source_commit": commit,
         "source_modified": dirty,
         "binary_sha256": _digest(binary_bytes),
-        "provenance": "Explicit caller-supplied binary; source commit identifies the packaging checkout. Binary/source correspondence is established by the build workflow, not inferred from bytes.",
+        "binary_source_commit": receipt["source_commit"],
+        "source_inputs_sha256": receipt["source_inputs_sha256"],
+        "rust_version": receipt["rust_version"],
+        "provenance": "Build receipt and current source inputs validated; source correspondence is established by the clean build and CI reproduction, not inferred from a checksum or treated as a signature.",
         "files": [
             {"path": name, "sha256": _digest(data), "size": len(data), "mode": f"{mode:04o}"}
             for name, (data, mode) in sorted(payload.items())

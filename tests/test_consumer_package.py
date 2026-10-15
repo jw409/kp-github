@@ -48,6 +48,11 @@ class ConsumerPackageTests(unittest.TestCase):
         self.binary = self.directory / "built-executable"
         self.binary.write_bytes(b"#!/bin/sh\nprintf 'synthetic binary\\n'\n")
         self.binary.chmod(0o755)
+        self.receipt = {"source_commit": self.commit,
+            "source_inputs_sha256": package._provenance.source_digest(self.source, self.commit),
+            "target": "x86_64-unknown-linux-gnu", "rust_version": "1.99.0",
+            "binary_sha256": hashlib.sha256(self.binary.read_bytes()).hexdigest()}
+        self.binary.with_suffix(".provenance.json").write_text(json.dumps(self.receipt))
         self.output = self.source / "dist"
         self.target = "x86_64-unknown-linux-gnu"
         self.root_name = "kp-github-consumer-" + self.target
@@ -192,6 +197,26 @@ class ConsumerPackageTests(unittest.TestCase):
         with self.assertRaises(package.PackageError):
             self.build()
         self.assertFalse(self.output.exists())
+
+    def test_changed_binary_and_forged_source_commit_are_rejected(self):
+        original = self.binary.read_bytes()
+        self.binary.write_bytes(original + b"X")
+        with self.assertRaises(package.PackageError):
+            self.build()
+        self.binary.write_bytes(original)
+        self.receipt['source_commit'] = '0' * 40
+        self.binary.with_suffix('.provenance.json').write_text(json.dumps(self.receipt))
+        with self.assertRaises(package.PackageError):
+            self.build()
+        self.assertFalse(self.output.exists())
+
+    def test_dirty_runtime_and_missing_receipt_cannot_be_packaged(self):
+        (self.source / 'Cargo.toml').write_text('changed build input')
+        with self.assertRaises(package.PackageError):
+            self.build()
+        self.binary.with_suffix('.provenance.json').unlink()
+        with self.assertRaises(package.PackageError):
+            self.build()
 
     def test_unsafe_archive_target_is_rejected(self):
         for target in ("../escape", "/absolute", "linux x86", "linux/../../escape", "--target"):

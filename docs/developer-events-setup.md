@@ -11,7 +11,7 @@ Run from the kp-github checkout, using the **exact object path supplied by the o
 ```sh
 python3 scripts/github_events_setup.py setup \
   --gcs-object gs://YOUR-CONFIG-BUCKET/YOUR-KNOWN-OBJECT \
-  --github-account jw409 \
+  --github-account jw408 \
   --google-account developer@meshly.ai
 ```
 
@@ -22,7 +22,7 @@ For copy/paste distribution, use the same versioned bundle:
 ```sh
 python3 scripts/github_events_setup.py setup \
   --bundle 'kpghcfg1_PASTE-THE-OPERATOR-BUNDLE-HERE' \
-  --github-account jw409 \
+  --github-account jw408 \
   --google-account developer@meshly.ai
 ```
 
@@ -31,12 +31,12 @@ Pasting a bundle avoids the GCS read; the listener connection still uses the dev
 Setup writes `~/.config/kp-github/events.json` and prints a launch command:
 
 ```sh
-KP_GITHUB_ACCOUNT=jw409 \
+KP_GITHUB_ACCOUNT=jw408 \
   KP_GITHUB_EVENTS_CONFIG="$HOME/.config/kp-github/events.json" \
   kp-github-mcp
 ```
 
-Use those same environment variables in the MCP host's server configuration. The profile's GitHub account is the default selection when no explicit `KP_GITHUB_ACCOUNT` override is present. Existing GitHub operations use that developer's credentials; the event receiver independently authenticates the Google identity and verifies its GitHub/repository authorization. A name in a local profile is not an access grant.
+Use those same environment variables in the MCP host's server configuration. The runtime reads a profile only when explicitly configured. Its GitHub account is event metadata and never selects credentials for ordinary GitHub tools. A missing or malformed profile disables only the event tool. For several accounts, use the explicit registry described in [account selection](account-selection.md), with separate profile output paths and multiple `allowed_orgs` per profile. Existing GitHub operations use that developer's credentials; the event receiver independently authenticates the Google identity and verifies its GitHub/repository authorization. A name in a local profile is not an access grant.
 
 The helper creates private directories with mode `0700` and atomically writes files with mode `0600`. An existing output directory must already be private and owned by the current user; setup will not change permissions on an existing home, checkout, or other directory. Symlinks in the destination path or profile files are rejected. Use `--output` to choose a dedicated private directory for a separate profile.
 

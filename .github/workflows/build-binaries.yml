@@ -26,20 +26,28 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          toolchain: 1.99.0
 
       - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        run: python3 scripts/binary_provenance.py build --target ${{ matrix.target }} --output target/${{ matrix.target }}/release/kp-github-mcp
+
+      - name: Smoke the native artifact
+        run: |
+          python3 tests/smoke_consumer.py --binary target/${{ matrix.target }}/release/kp-github-mcp
+          python3 tests/smoke_shared_http.py --binary target/${{ matrix.target }}/release/kp-github-mcp
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.dir }}
-          path: target/${{ matrix.target }}/release/kp-github-mcp
+          path: target/${{ matrix.target }}/release/kp-github-mcp*
 
   commit-binaries:
     # Marketplace binaries are published only by an intentional main dispatch.
@@ -62,15 +70,8 @@ jobs:
         with:
           path: artifacts/
 
-      - name: Place binaries
-        run: |
-          for d in artifacts/*/; do
-            plat="$(basename "$d")"
-            mkdir -p "bin/$plat"
-            find "$d" -maxdepth 1 -type f -exec cp -t "bin/$plat/" {} +
-            find "bin/$plat" -maxdepth 1 -type f -exec chmod +x {} +
-          done
-          ls -lhR bin/
+      - name: Validate source-bound receipts and place binaries
+        run: python3 scripts/binary_provenance.py assemble --artifacts artifacts
 
       - name: Commit and push
         run: |
@@ -80,6 +81,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "build: update pre-built binaries [skip ci]"
+            git commit -m "build: update verified pre-built binaries"
             git push origin HEAD:main
           fi

@@ -12,8 +12,8 @@ client does not register arbitrary customers with Meshly's receiver.
 
 ## Developer configuration and identity
 
-The optional local profile is read from `KP_GITHUB_EVENTS_CONFIG`, or from
-`~/.config/kp-github/events.json` when that variable is absent:
+The optional local profile is read only from an explicit `KP_GITHUB_EVENTS_CONFIG`,
+or from a named account entry in `KP_GITHUB_ACCOUNTS_CONFIG`:
 
 ```json
 {
@@ -21,7 +21,7 @@ The optional local profile is read from `KP_GITHUB_EVENTS_CONFIG`, or from
   "endpoint": "https://events.example.com",
   "audience": "receiver-approved-google-oauth-client-id",
   "allowed_orgs": ["Meshlyai", "Meshly-Open-Source"],
-  "github_account": "jw409",
+  "github_account": "jw408",
   "google_account": "developer@example.com",
   "app_slug": "meshly-open-source-dev-events"
 }
@@ -29,13 +29,14 @@ The optional local profile is read from `KP_GITHUB_EVENTS_CONFIG`, or from
 
 The example endpoint and audience are placeholders. The receiver operator must
 publish the real values. The optional `google_account` pins a stored gcloud
-account; supplying it is recommended. The existing GitHub credential resolver
-uses the selected `github_account` for GitHub operations. The profile does not
+account; supplying it is recommended. GitHub API credentials are selected independently via an explicit process default
+or the request's `github_account` selector; this profile cannot change them. The profile does not
 prove that those GitHub and Google accounts belong to the same person.
 
-An absent default profile leaves ordinary GitHub operations available. An
-explicitly named missing profile, an invalid profile, or a profile symlink fails
-clearly rather than silently selecting another identity. Profiles are limited
+An unconfigured profile leaves ordinary GitHub operations available. An
+explicitly named missing profile, invalid profile, or profile symlink disables
+only that account's event tool and reports the configuration error. A file at
+the default setup output path is never loaded implicitly. Profiles are limited
 to 64 KiB and must be regular files. Production consumer endpoints require HTTPS
 and cannot contain credentials, queries, fragments, whitespace, or backslashes.
 Only test constructors allow HTTP on loopback. Redirects are never followed.
@@ -179,3 +180,19 @@ These tests prove the client's behavior against a fake receiver. They do not pro
 receiver authorization, webhook capture, durable publication, deployment, or live
 GitHub event delivery. The receiver owner must implement and validate those
 properties before an operational endpoint/audience can be published to developers.
+
+## Multiple GitHub identities and organizations
+
+Every consumer request includes `X-KP-GitHub-Account`, the selected profile's
+GitHub login. This is a requested identity, **not proof of ownership**. The
+receiver must require a verified link from the authenticated Google subject to
+that GitHub identity, reject unknown links, and scope listener ownership and
+acks to that pair. If one Google subject has several linked GitHub accounts,
+it must not silently choose one or ignore this header. Receiver deployment and
+acceptance of this selector remain part of the pending receiver contract.
+
+Profiles may list several `allowed_orgs`, including future onboarded orgs.
+Registration still names an explicit owner/repo. Installation access and current
+repository authorization are enforced at the receiver; local account and org
+lists grant no server permission. Cursors, listener IDs and ack tokens from one
+account must not be usable by another, even when the accounts share an org.

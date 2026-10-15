@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "platforms": {
     "linux-x86_64": {
       "source_commit": "209ca4d9a6e30fc6dc2a568969ce86dc6a76b4f2",
@@ -8,7 +8,9 @@
       "archive_sha256": "2952cf29931a16bf93d729e505dab052378c8796b70e39c5922e66f293cc5eea",
       "build_run": "https://github.com/jw409/kp-github/actions/runs/38717997402",
       "artifact": "consumer-linux-x86_64",
-      "validation": "Native workflow MCP smoke; archive, manifest and all file SHA256 values verified before extracting binary"
+      "validation": "Native workflow MCP smoke; archive, manifest and all file SHA256 values verified before extracting binary",
+      "rust_version": "1.99.0",
+      "source_inputs_sha256": "b99744f031431afe111d93269ac856662e02909d91303ec7be7552ccd762574e"
     },
     "macos-arm64": {
       "source_commit": "209ca4d9a6e30fc6dc2a568969ce86dc6a76b4f2",
@@ -17,7 +19,9 @@
       "archive_sha256": "b565c462845fff2024694eb8d7017432e4d953cc5deda3161619045c8210ac84",
       "build_run": "https://github.com/jw409/kp-github/actions/runs/38717997402",
       "artifact": "consumer-macos-arm64",
-      "validation": "Native workflow MCP smoke; archive, manifest and all file SHA256 values verified before extracting binary"
+      "validation": "Native workflow MCP smoke; archive, manifest and all file SHA256 values verified before extracting binary",
+      "rust_version": "1.99.0",
+      "source_inputs_sha256": "b99744f031431afe111d93269ac856662e02909d91303ec7be7552ccd762574e"
     }
   }
 }

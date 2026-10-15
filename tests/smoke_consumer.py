@@ -52,6 +52,9 @@ def check_mcp(env, expected_error):
         reply = send({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call',
                       'params': {'name': 'github_events', 'arguments': arguments}})
         assert expected_error in reply['error']['message']
+        reply = send({'jsonrpc': '2.0', 'id': 4, 'method': 'tools/call',
+                      'params': {'name': 'github_repos_get', 'arguments': {}}})
+        assert reply['error']['code'] == -32602, 'Core tool dispatch must remain available'
         return len(tools)
     finally:
         selector.close()
@@ -100,13 +103,26 @@ exit 23
             'SMOKE_CALLS': str(log)}
     count = check_mcp(base, 'not configured')
     assert not log.exists(), 'Disabled events must not invoke account or gcloud commands'
+    # A default-path file cannot affect startup, even if malformed or naming
+    # a real second account. No real credential command is available here.
+    home = directory / 'home'
+    default = home / '.config/kp-github/events.json'
+    default.parent.mkdir(parents=True)
+    for contents in (profile.read_text().replace('profile-dev', 'jw409'), '{malformed'):
+        default.write_text(contents)
+        check_mcp(dict(base, HOME=str(home)), 'not configured')
+    bad = directory / 'malformed.json'
+    bad.write_text('{malformed')
+    check_mcp(dict(base, KP_GITHUB_EVENTS_CONFIG=str(bad)), 'Invalid developer events configuration')
+    check_mcp(dict(base, KP_GITHUB_EVENTS_CONFIG=str(directory / 'missing.json')), 'Cannot read developer events configuration')
+    assert not log.exists(), 'Profiles must not trigger credential lookups'
     configured = dict(base, KP_GITHUB_EVENTS_CONFIG=str(profile))
     check_mcp(configured, 'outside this profile')
-    assert log.read_text().splitlines() == ['gh:profile-dev']
+    assert not log.exists(), 'Event profiles must never select a GitHub credential'
     configured['KP_GITHUB_ACCOUNT'] = 'override-dev'
-    check_mcp(configured, 'outside this profile')
-    assert log.read_text().splitlines() == ['gh:profile-dev', 'gh:override-dev']
+    check_mcp(configured, 'profile account differs')
+    assert log.read_text().splitlines() == ['gh:override-dev']
     print(json.dumps({'result': 'passed', 'tools': count,
-        'cases': ['missing profile', 'setup profile selects stored account',
-                  'explicit account overrides profile'],
+        'cases': ['absent/default/explicit profiles never select identity',
+                  'malformed explicit profile preserves core tools', 'explicit account remains pinned'],
         'gcloud_calls': 0, 'network_calls': 0}))

@@ -186,6 +186,56 @@ class SharedHttpTests(unittest.TestCase):
         self.assertEqual(len(reply['result']['tools']), 67)
         self.assertIsNone(self.process.poll())
 
+    def test_multi_account_missing_credential_isolated_and_success_cached(self):
+        gh = self.root / 'commands/gh'
+        gh.write_text("#!/bin/sh\n"
+                      "test \"$1 $2 $3 $4 $5\" = 'auth token --hostname github.com --user' || exit 27\n"
+                      "test -z \"${GH_TOKEN+x}${GITHUB_TOKEN+x}\" || exit 28\n"
+                      "printf '%s\\n' \"$6\" >> \"$SMOKE_CALLS\"\n"
+                      "test \"$6\" != absent-dev || exit 1\n"
+                      "printf 'synthetic-github-credential\\n'\n")
+        config = self.root / 'accounts.json'
+        bad_profile = self.root / 'bad-events.json'
+        bad_profile.write_text('{bad')
+        config.write_text(json.dumps({'version': 1, 'accounts': [
+            {'github_account': 'work-dev'}, {'github_account': 'other-dev'},
+            {'github_account': 'absent-dev', 'events_config': str(bad_profile)}]}))
+        self.env.pop('KP_GITHUB_ACCOUNT')
+        self.env.update(KP_GITHUB_ACCOUNTS_CONFIG=str(config), GH_TOKEN='synthetic-wrong-ambient')
+        # Keep expected startup warnings out of the readiness-line fixture.
+        self.env['KP_GITHUB_LOG_LEVEL'] = 'error'
+        self.start()
+        sessions = [self.initialize() for _ in range(9)]
+        self.assertFalse(self.calls.exists(), 'Named credentials must be lazy')
+        def call(index):
+            name = 'work-dev' if index % 2 == 0 else 'other-dev'
+            # Missing required tool arguments stops before any live GitHub call,
+            # after the real dispatcher has selected/cached the credential.
+            reply, _ = self.rpc('tools/call', sessions[index % 9], {
+                'name': 'github_repos_get', 'arguments': {'github_account': name}})
+            self.assertIn('error', reply)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=9) as pool:
+            list(pool.map(call, range(18)))
+        self.assertCountEqual(self.calls.read_text().splitlines(), ['work-dev', 'other-dev'])
+        for name in ['absent-dev', 'not-allowed']:
+            reply, _ = self.rpc('tools/call', sessions[0], {'name': 'github_user_me', 'arguments': {'github_account': name}})
+            self.assertIn('error', reply)
+        self.assertCountEqual(self.calls.read_text().splitlines(), ['work-dev', 'other-dev', 'absent-dev'])
+        reply, _ = self.rpc('tools/call', sessions[0], {'name': 'github_events', 'arguments': {'github_account': 'absent-dev', 'action': 'list'}})
+        self.assertIn('Invalid developer events configuration', reply['error']['message'])
+        reply, _ = self.rpc('tools/list', sessions[0])
+        self.assertEqual(len(reply['result']['tools']), 67)
+        call(0)
+        self.assertEqual(len(self.calls.read_text().splitlines()), 3)
+        # Adding the missing credential repairs only that account on its next
+        # request; no restart or fallback identity is needed.
+        gh.write_text(gh.read_text().replace('test "$6" != absent-dev || exit 1\n', ''))
+        for _ in range(2):
+            reply, _ = self.rpc('tools/call', sessions[0], {'name': 'github_repos_get', 'arguments': {'github_account': 'absent-dev'}})
+            self.assertEqual(reply['error']['code'], -32602)  # missing owner/repo
+            self.assertNotIn('no stored GitHub token', reply['error']['message'])
+        self.assertEqual(self.calls.read_text().splitlines().count('absent-dev'), 2)
+
     def test_closed_sessions_and_restart_require_fresh_initialization(self):
         self.start()
         session = self.initialize()

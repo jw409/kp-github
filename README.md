@@ -7,7 +7,7 @@ tokens the raw API returns, and surfaces the fields agents actually act on
 
 Binary: `kp-github-mcp`.
 
-Several sessions on one machine can use the optional [shared local HTTP server](docs/shared-local-server.md), with separate MCP sessions and one pinned account/profile. The default transport remains stdio.
+Several sessions on one machine can use the optional [shared local HTTP server](docs/shared-local-server.md), with separate MCP sessions and explicit request-scoped accounts and separate event profiles. The default transport remains stdio.
 
 ## Build
 
@@ -22,11 +22,11 @@ cargo build --release   # -> target/release/kp-github-mcp
 claude mcp add kp-github --transport stdio -- /path/to/kp-github-mcp
 ```
 
-Select a stored account for this process with `KP_GITHUB_ACCOUNT=jw409`, or use
-`GH_TOKEN`, then `GITHUB_TOKEN`, then the existing `gh` default. An event profile
-can also supply the account. Selection never changes the machine-wide `gh`
-default. See [account selection](docs/account-selection.md). Commit author
-defaults come from `GIT_AUTHOR_*`.
+Select a stored account for this process with `KP_GITHUB_ACCOUNT=jw408`, or use
+`GH_TOKEN`, then `GITHUB_TOKEN`, then the existing `gh` default. Event profiles
+never choose credentials for ordinary GitHub tools. For multiple accounts and
+organizations in one process, explicitly enable `KP_GITHUB_ACCOUNTS_CONFIG` and
+select `github_account` on each tool call. See [account selection](docs/account-selection.md).
 
 ## GitHub event app
 

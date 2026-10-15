@@ -952,7 +952,7 @@ esac
             return;
         }
 
-        let result = crate::auth::resolve_token_for_account(Some("jw408"));
+        let result = crate::auth::resolve_token();
         if std::env::var("KP_GITHUB_ACCOUNT").unwrap() != "jw409" {
             assert!(matches!(result, Err(crate::auth::AuthError::SelectedAccountMissing)));
             return;

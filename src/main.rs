@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod account_tests;
+mod accounts;
 mod auth;
 mod compress;
 mod events;
@@ -32,17 +35,11 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("kp-github-mcp starting");
 
-    // Configuration is local and cached; creating the events client makes no
-    // network requests. Its account selection also applies to GitHub tools.
-    let events = events::EventsClient::from_environment()?;
-    let token = match events.as_ref() {
-        Some(client) => auth::resolve_token_for_account(Some(client.github_account()))?,
-        None => auth::resolve_token()?,
-    };
-    tracing::info!("GitHub auth resolved");
-
+    // Accounts and events have separate authority. Profile errors disable only
+    // that account's event tool; profiles never select GitHub credentials.
+    let server = server::configured(accounts::Accounts::from_environment()?);
     match http {
-        Some(config) => shared_http::run(server::configured(&token, events), config).await,
-        None => server::run(token, events).await,
+        Some(config) => shared_http::run(server, config).await,
+        None => server::run(server).await,
     }
 }

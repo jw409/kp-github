@@ -27,7 +27,9 @@ Ordinary GitHub tools work without an events profile. Listener registration and 
 From a checkout with the desired source revision, build the target explicitly and package that executable:
 
 ```sh
-cargo build --locked --release --target x86_64-unknown-linux-gnu
+python3 scripts/binary_provenance.py build \
+  --target x86_64-unknown-linux-gnu \
+  --output target/x86_64-unknown-linux-gnu/release/kp-github-mcp
 python3 scripts/package_consumer.py \
   --binary target/x86_64-unknown-linux-gnu/release/kp-github-mcp \
   --target x86_64-unknown-linux-gnu \
@@ -35,13 +37,48 @@ python3 scripts/package_consumer.py \
   --output-dir dist
 ```
 
-The packager requires a nonempty executable file. It reads the checkout's actual Git HEAD; `--expect-commit FULL_SHA` additionally rejects a mismatched checkout. It does not infer whether a supplied executable was built from those sources or whether its architecture matches `--target`. The workflow establishes that correspondence by building the exact checked-out source and passing its target output directly. Binary SHA-256 is recorded independently.
+Commit the build inputs first. The build helper compiles that commit in a fresh
+directory with the pinned Rust version and emits a `.provenance.json` sidecar.
+The packager requires this receipt, checks the executable hash and target,
+resolves its source commit in Git, and requires the build inputs to match the
+current clean checkout. Arbitrary executables, stale source, a missing receipt,
+zeroed source commit, or altered bytes fail before an archive is written.
+`--expect-commit FULL_SHA` additionally pins the packaging checkout.
+
+A receipt is not a signature. CI separately rebuilds each checked-in platform
+binary from its declared source and compares the actual output bytes. Rewriting
+a binary and its checksum together cannot satisfy that comparison unless the
+rebuild agrees. Trusted review of source and CI remains the trust boundary.
 
 With identical source revision/state, payload bytes, binary, and target, repeated packaging produces identical archive bytes. Archive paths are relative beneath one fixed package directory; permissions, ownership, ordering, gzip header, and timestamps are normalized. The explicit payload allowlist excludes unlisted checkout files, private configuration, credentials, caches, and Git metadata. Optional example files are included only when present under their documented names.
 
 The **Consumer Packages** workflow uploads artifacts for review without repository write permissions. The older **Build Binaries** workflow retains marketplace publication only for an explicit dispatch on `main`; feature and tag builds cannot commit to `main`, and publication fails if `main` advanced after its source was built.
 
-For several sessions sharing one selected account/profile on a machine, see
+For several sessions sharing explicitly enabled accounts and organizations on a machine, see
 [shared local HTTP](shared-local-server.md). The archive includes
 `scripts/setup_shared_http.py`; it creates a private local bearer key and HTTP
 client configuration without changing installed MCP settings.
+
+## Checked-in binaries
+
+```sh
+python3 scripts/binary_provenance.py verify
+python3 scripts/binary_provenance.py verify --require-current
+python3 scripts/binary_provenance.py reproduce --platform linux-x86_64
+```
+
+The first check validates both tracked payloads against their declared source
+receipts and is part of ordinary Python test discovery. The second additionally
+rejects stale binaries after a source change. The third builds the declared
+revision from scratch and requires identical bytes; use `macos-arm64` on a
+native macOS runner. Full Git history and the receipt's exact Rust toolchain are
+required. Cargo registry paths are normalized to the native Actions paths so
+panic locations and C source filenames do not depend on the developer's home.
+Compiler/SDK changes can still fail reproduction; such failures block the gate
+and require investigation, never automatic acceptance of new hashes.
+
+The tracked binaries currently retain their declared historical source until
+both native replacement artifacts are built and reviewed. They do not contain
+new unshipped source changes. Build a fresh consumer package to test those changes.
+The publication job assembles both artifacts and validates their receipts against
+the publication checkout before committing them; it does not skip CI.

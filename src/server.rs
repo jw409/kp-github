@@ -35,6 +35,8 @@ const GLOBAL_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 pub struct KpGithubServer {
     client: Arc<GithubClient>,
     events: Option<Arc<EventsClient>>,
+    events_error: Option<String>,
+    accounts: Option<Arc<crate::accounts::Accounts>>,
     tool_router: ToolRouter<Self>,
     /// Opt-in usage sink (`KP_GITHUB_USAGE_LOG`). `None` = disabled, zero overhead.
     usage_log: Option<Arc<std::sync::Mutex<std::fs::File>>>,
@@ -45,6 +47,8 @@ impl KpGithubServer {
         Self {
             client: Arc::new(GithubClient::new(token)),
             events: None,
+            events_error: None,
+            accounts: None,
             tool_router: Self::tool_router(),
             usage_log: Self::open_usage_log(),
         }
@@ -55,9 +59,37 @@ impl KpGithubServer {
         Self {
             client: Arc::new(client),
             events: None,
+            events_error: None,
+            accounts: None,
             tool_router: Self::tool_router(),
             usage_log: None,
         }
+    }
+
+    fn account_schema(&self, mut tool: rmcp::model::Tool) -> rmcp::model::Tool {
+        let schema = Arc::make_mut(&mut tool.input_schema);
+        let mut selector = serde_json::json!({"type":"string", "description":
+            "GitHub login explicitly enabled for this server. Selects only this request; never changes gh's active account. Required in multi-account mode without a default."});
+        if let Some(accounts) = &self.accounts {
+            let names = accounts.names();
+            if !names.is_empty() { selector["enum"] = serde_json::json!(names); }
+        }
+        schema.entry("properties".to_string()).or_insert_with(|| serde_json::json!({}))
+            .as_object_mut().unwrap().insert("github_account".into(), selector.clone());
+        // Events uses a closed, tagged union: the selector must be admitted by
+        // each branch too, or validating clients reject an otherwise valid call.
+        if let Some(Value::Array(variants)) = schema.get_mut("oneOf") {
+            for variant in variants {
+                if let Some(properties) = variant.get_mut("properties").and_then(Value::as_object_mut) {
+                    properties.insert("github_account".into(), selector.clone());
+                }
+            }
+        }
+        if self.accounts.as_ref().is_some_and(|accounts| accounts.requires_selector()) {
+            schema.entry("required".to_string()).or_insert_with(|| serde_json::json!([]))
+                .as_array_mut().unwrap().push(serde_json::json!("github_account"));
+        }
+        tool
     }
 
     /// Open the opt-in usage log named by `KP_GITHUB_USAGE_LOG` (append mode).
@@ -993,6 +1025,9 @@ impl KpGithubServer {
     /// Requires a configured receiver implementing the proposed v1 API.
     #[rmcp::tool(name = "github_events")]
     async fn github_events(&self, Parameters(request): Parameters<EventsRequest>) -> Result<CallToolResult, McpError> {
+        if let Some(error) = &self.events_error {
+            return Err(McpError::invalid_request(error.clone(), None));
+        }
         let client = self.events.as_ref().ok_or_else(|| McpError::invalid_request(
             "Developer events are not configured. Run scripts/github_events_setup.py setup with your receiver's config bundle, then set KP_GITHUB_EVENTS_CONFIG to the saved profile.",
             None,
@@ -1698,8 +1733,32 @@ impl ServerHandler for KpGithubServer {
             (keys, has("fields"), has("format"), limit)
         });
 
-        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let (res, outcome) = match tokio::time::timeout(GLOBAL_TOOL_TIMEOUT, self.tool_router.call(tcc)).await {
+        let dispatch = async {
+            let mut request = request;
+            let selected = request.arguments.as_mut().and_then(|args| args.remove("github_account"));
+            let selected = match selected.as_ref() {
+                None => None,
+                Some(Value::String(name)) => Some(name.as_str()),
+                _ => return Err(McpError::invalid_params("github_account must be a login string", None)),
+            };
+            // A request-local clone shares pools/caches, but never an active-account
+            // variable. Concurrent requests and sessions cannot change each other.
+            let mut scoped = self.clone();
+            if let Some(accounts) = &self.accounts {
+                if tool_name == "github_events" {
+                    let events = accounts.events(selected).map_err(|e| McpError::invalid_params(e, None))?;
+                    scoped.events = events.client;
+                    scoped.events_error = events.error;
+                } else {
+                    scoped.client = accounts.client(selected).await.map_err(|e| McpError::invalid_params(e, None))?;
+                }
+            } else if selected.is_some() {
+                return Err(McpError::invalid_params("account selection is unavailable", None));
+            }
+            let tcc = rmcp::handler::server::tool::ToolCallContext::new(&scoped, request, context);
+            scoped.tool_router.call(tcc).await
+        };
+        let (res, outcome) = match tokio::time::timeout(GLOBAL_TOOL_TIMEOUT, dispatch).await {
             Ok(Ok(ct)) => (Ok(ct), "ok"),
             Ok(Err(e)) => (Err(e), "error"),
             Err(_) => (
@@ -1731,14 +1790,14 @@ impl ServerHandler for KpGithubServer {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, McpError> {
         Ok(rmcp::model::ListToolsResult {
-            tools: self.tool_router.list_all(),
+            tools: self.tool_router.list_all().into_iter().map(|tool| self.account_schema(tool)).collect(),
             meta: None,
             next_cursor: None,
         })
     }
 
     fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
-        self.tool_router.get(name).cloned()
+        self.tool_router.get(name).cloned().map(|tool| self.account_schema(tool))
     }
 
     fn get_info(&self) -> ServerInfo {
@@ -1769,7 +1828,7 @@ impl ServerHandler for KpGithubServer {
         use rmcp::model::RawResourceTemplate;
         use rmcp::model::Annotated;
 
-        let templates = vec![
+        let mut templates = vec![
             Annotated::new(
                 RawResourceTemplate {
                     uri_template: "github://repos/{owner}/{repo}/issues".into(),
@@ -1816,6 +1875,12 @@ impl ServerHandler for KpGithubServer {
             ),
         ];
 
+        let named: Vec<_> = templates.iter().cloned().map(|mut template| {
+            template.raw.uri_template = template.raw.uri_template.replace("github://repos/", "github://accounts/{github_account}/repos/");
+            template.raw.name = format!("account_{}", template.raw.name);
+            template
+        }).collect();
+        templates.extend(named);
         std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(templates)))
     }
 
@@ -1827,10 +1892,19 @@ impl ServerHandler for KpGithubServer {
         async move {
             let uri = &request.uri;
 
-            // Parse github://repos/{owner}/{repo}[/suffix]
-            let path = uri
-                .strip_prefix("github://repos/")
-                .ok_or_else(|| McpError::invalid_params(format!("unsupported URI scheme: {uri}"), None))?;
+            // Named resources: github://accounts/{account}/repos/{owner}/{repo}.
+            // Legacy resource URIs use only the explicitly configured default.
+            let (selected, path) = if let Some(rest) = uri.strip_prefix("github://accounts/") {
+                let (account, rest) = rest.split_once("/repos/").ok_or_else(|| McpError::invalid_params("invalid account resource URI", None))?;
+                (Some(account), rest)
+            } else {
+                (None, uri.strip_prefix("github://repos/").ok_or_else(|| McpError::invalid_params("unsupported resource URI", None))?)
+            };
+            let client = match &self.accounts {
+                Some(accounts) => accounts.client(selected).await.map_err(|e| McpError::invalid_params(e, None))?,
+                None if selected.is_none() => self.client.clone(),
+                None => return Err(McpError::invalid_params("account selection is unavailable", None)),
+            };
 
             let parts: Vec<&str> = path.splitn(3, '/').collect();
             if parts.len() < 2 {
@@ -1846,21 +1920,21 @@ impl ServerHandler for KpGithubServer {
 
             let (text, mime) = match suffix {
                 "issues" => {
-                    let result = tools::issues::list(&self.client, owner, repo, Some("open"), Some(30))
+                    let result = tools::issues::list(&client, owner, repo, Some("open"), Some(30))
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                     let output = self.compress_and_format(result, None, None);
                     (output, "text/plain")
                 }
                 "pulls" => {
-                    let result = tools::prs::list(&self.client, owner, repo, Some("open"), Some(30))
+                    let result = tools::prs::list(&client, owner, repo, Some("open"), Some(30))
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                     let output = self.compress_and_format(result, None, None);
                     (output, "text/plain")
                 }
                 "readme" => {
-                    let result = tools::files::get_contents(&self.client, owner, repo, "README.md", None)
+                    let result = tools::files::get_contents(&client, owner, repo, "README.md", None)
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                     // The GitHub contents API returns base64-encoded content;
@@ -1884,7 +1958,7 @@ impl ServerHandler for KpGithubServer {
                     (text, "text/markdown")
                 }
                 "" => {
-                    let result = tools::repos::get(&self.client, owner, repo)
+                    let result = tools::repos::get(&client, owner, repo)
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                     let output = self.compress_and_format(result, None, None);
@@ -1910,14 +1984,13 @@ impl ServerHandler for KpGithubServer {
     }
 }
 
-pub(crate) fn configured(token: &str, events: Option<EventsClient>) -> KpGithubServer {
-    let mut server = KpGithubServer::new(token);
-    server.events = events.map(Arc::new);
+pub(crate) fn configured(accounts: crate::accounts::Accounts) -> KpGithubServer {
+    let mut server = KpGithubServer::new("unselected-request-must-resolve-account");
+    server.accounts = Some(Arc::new(accounts));
     server
 }
 
-pub async fn run(token: String, events: Option<EventsClient>) -> anyhow::Result<()> {
-    let server = configured(&token, events);
+pub async fn run(server: KpGithubServer) -> anyhow::Result<()> {
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())

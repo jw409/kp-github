@@ -21,52 +21,57 @@ pub enum AuthError {
     Timeout(String),
 }
 
-/// Resolve once, without a validation request or a change to gh's active account.
+/// Resolve once without validation requests or changes to gh's active account.
+/// Only the explicit process selector may override ambient credentials.
 pub fn resolve_token() -> Result<String, AuthError> {
-    resolve_token_for_account(None)
-}
-
-/// Explicit environment account, then profile account, then gh-compatible token
-/// precedence, then the stored default account. Account selection fails closed:
-/// an unavailable selected account never falls back to an ambient credential.
-pub fn resolve_token_for_account(profile_account: Option<&str>) -> Result<String, AuthError> {
-    let account = match std::env::var("KP_GITHUB_ACCOUNT") {
-        Ok(account) => Some(account),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err(AuthError::InvalidAccount),
-    };
+    let account = selected_account()?;
     resolve_token_from_sources(
         account.as_deref(),
-        profile_account,
         std::env::var("GH_TOKEN").ok().as_deref(),
         std::env::var("GITHUB_TOKEN").ok().as_deref(),
         stored_token,
     )
 }
 
+pub fn selected_account() -> Result<Option<String>, AuthError> {
+    match std::env::var("KP_GITHUB_ACCOUNT") {
+        Ok(account) => {
+            validate_account(&account)?;
+            Ok(Some(account))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(AuthError::InvalidAccount),
+    }
+}
+
+pub fn validate_account(account: &str) -> Result<(), AuthError> {
+    if account.is_empty()
+        || account.len() > 39
+        || !account
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        || account.starts_with('-')
+        || account.ends_with('-')
+    {
+        return Err(AuthError::InvalidAccount);
+    }
+    Ok(())
+}
+
+/// Named requests always use that stored credential, never an ambient token.
+pub fn named_token(account: &str) -> Result<String, AuthError> {
+    validate_account(account)?;
+    stored_token(Some(account))
+}
+
 fn resolve_token_from_sources(
-    environment_account: Option<&str>,
-    profile_account: Option<&str>,
+    account: Option<&str>,
     gh_token: Option<&str>,
     github_token: Option<&str>,
     lookup: impl FnOnce(Option<&str>) -> Result<String, AuthError>,
 ) -> Result<String, AuthError> {
-    let account = environment_account
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| profile_account.map(str::trim).filter(|s| !s.is_empty()));
     if let Some(account) = account {
-        // Do not reflect invalid values into errors: a misplaced secret should
-        // not be printed as an account name.
-        if account.len() > 39
-            || !account
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
-            || account.starts_with('-')
-            || account.ends_with('-')
-        {
-            return Err(AuthError::InvalidAccount);
-        }
+        validate_account(account)?;
         return lookup(Some(account));
     }
     if let Some(token) = gh_token.filter(|s| !s.is_empty()) {
@@ -148,11 +153,11 @@ mod tests {
     #[test]
     fn environment_token_precedence_matches_gh() {
         let token =
-            resolve_token_from_sources(None, None, Some("gh-first"), Some("github-second"), |_| {
+            resolve_token_from_sources(None, Some("gh-first"), Some("github-second"), |_| {
                 panic!("must use token")
             });
         assert_eq!(token.unwrap(), "gh-first");
-        let token = resolve_token_from_sources(None, None, Some(""), Some("github-second"), |_| {
+        let token = resolve_token_from_sources(None, Some(""), Some("github-second"), |_| {
             panic!("must use token")
         });
         assert_eq!(token.unwrap(), "github-second");
@@ -160,7 +165,7 @@ mod tests {
 
     #[test]
     fn empty_tokens_resolve_stored_default() {
-        let token = resolve_token_from_sources(None, None, Some(""), Some(""), |account| {
+        let token = resolve_token_from_sources(None, Some(""), Some(""), |account| {
             assert_eq!(account, None);
             Ok("stored-default".into())
         });
@@ -168,14 +173,13 @@ mod tests {
     }
 
     #[test]
-    fn explicit_account_wins_over_profile_and_ambient_tokens() {
+    fn explicit_account_wins_over_ambient_tokens() {
         let token = resolve_token_from_sources(
-            Some("jw409"),
-            Some("jw408"),
+            Some("selected-dev"),
             Some("ambient-gh"),
             Some("ambient-github"),
             |account| {
-                assert_eq!(account, Some("jw409"));
+                assert_eq!(account, Some("selected-dev"));
                 Ok("selected-token".into())
             },
         );
@@ -183,25 +187,9 @@ mod tests {
     }
 
     #[test]
-    fn profile_account_wins_over_ambient_tokens() {
-        let token = resolve_token_from_sources(
-            Some(" "),
-            Some("jw408"),
-            Some("ambient-gh"),
-            Some("ambient-github"),
-            |account| {
-                assert_eq!(account, Some("jw408"));
-                Ok("profile-token".into())
-            },
-        );
-        assert_eq!(token.unwrap(), "profile-token");
-    }
-
-    #[test]
     fn missing_selected_account_does_not_fall_back() {
         let token = resolve_token_from_sources(
             Some("missing-account"),
-            None,
             Some("ambient-gh"),
             Some("ambient-github"),
             |_| Err(AuthError::SelectedAccountMissing),
@@ -212,18 +200,19 @@ mod tests {
     #[test]
     fn invalid_selector_fails_without_looking_up_or_exposing_input() {
         for account in [
+            "",
+            " ",
             "--hostname=other",
             "user name",
             "ghp_synthetic_secret",
             "user/",
         ] {
-            let error =
-                resolve_token_from_sources(Some(account), None, Some("ambient"), None, |_| {
-                    panic!("invalid selector must fail before lookup")
-                })
-                .unwrap_err();
+            let error = resolve_token_from_sources(Some(account), Some("ambient"), None, |_| {
+                panic!("invalid selector must fail before lookup")
+            })
+            .unwrap_err();
             assert!(matches!(error, AuthError::InvalidAccount));
-            assert!(!error.to_string().contains(account));
+            assert!(account.trim().is_empty() || !error.to_string().contains(account));
         }
     }
 
@@ -237,7 +226,7 @@ mod tests {
         cmd.args([
             "-c",
             r#"
-            test "$*" = 'auth token --hostname github.com --user jw409' || exit 11
+            test "$*" = 'auth token --hostname github.com --user selected-dev' || exit 11
             test -z "${GH_TOKEN+x}${GITHUB_TOKEN+x}${GH_HOST+x}${GH_DEBUG+x}" || exit 12
             test "$GH_PROMPT_DISABLED" = 1 || exit 13
             printf 'synthetic-selected-token\n'
@@ -248,7 +237,7 @@ mod tests {
             .env("GITHUB_TOKEN", "wrong-github")
             .env("GH_HOST", "wrong-host")
             .env("GH_DEBUG", "api");
-        configure_stored_token_command(&mut cmd, Some("jw409"));
+        configure_stored_token_command(&mut cmd, Some("selected-dev"));
         let (success, stdout) = run_with_timeout(cmd, Duration::from_secs(5)).unwrap();
         assert!(success);
         assert_eq!(stdout.trim(), "synthetic-selected-token");
