@@ -20,8 +20,28 @@ cargo build --release   # -> target/release/kp-github-mcp
 claude mcp add kp-github --transport stdio -- /path/to/kp-github-mcp
 ```
 
-Auth follows the ambient GitHub credentials; commit author defaults come from
-`GIT_AUTHOR_*`.
+Select a stored account for this process with `KP_GITHUB_ACCOUNT=jw409`, or use
+`GH_TOKEN`, then `GITHUB_TOKEN`, then the existing `gh` default. An event profile
+can also supply the account. Selection never changes the machine-wide `gh`
+default. See [account selection](docs/account-selection.md). Commit author
+defaults come from `GIT_AUTHOR_*`.
+
+## GitHub event app
+
+The optional [app registration helper](docs/github-app.md) creates a minimal,
+read-only GitHub App for PR approvals, merges, and CI events. It uses explicit
+per-process GitHub credentials and keeps app keys private to the operator.
+Developers can use the [cached setup helper](docs/developer-events-setup.md) to
+load one shared config bundle through GCS or copy/paste. Each developer keeps
+their own GitHub and Google credentials; app signing keys stay with the receiver.
+
+The optional `github_events` tool registers, lists, removes, reads, and explicitly
+acknowledges listeners for PR approvals, merges, and CI failures. Reads support a
+bounded wait and preserve event identifiers and payloads. Its
+[proposed receiver API](docs/listener-api.md) is tested against a local fake
+service; production use still requires the receiver owner to deploy that API
+and publish its config. Meshly's instance serves its own onboarded organizations;
+other adopters deploy their own receiver and app.
 
 ## Relationship to kinderpowers
 

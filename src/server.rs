@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::compress::{compress, CompressConfig, OutputFormat};
 use crate::format::format_output;
+use crate::events::{EventsClient, EventsRequest};
 use crate::github::client::GithubClient;
 use crate::tools;
 
@@ -32,6 +33,7 @@ const GLOBAL_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 pub struct KpGithubServer {
     client: Arc<GithubClient>,
+    events: Option<EventsClient>,
     tool_router: ToolRouter<Self>,
     /// Opt-in usage sink (`KP_GITHUB_USAGE_LOG`). `None` = disabled, zero overhead.
     usage_log: Option<Arc<std::sync::Mutex<std::fs::File>>>,
@@ -41,6 +43,7 @@ impl KpGithubServer {
     fn new(token: &str) -> Self {
         Self {
             client: Arc::new(GithubClient::new(token)),
+            events: None,
             tool_router: Self::tool_router(),
             usage_log: Self::open_usage_log(),
         }
@@ -50,6 +53,7 @@ impl KpGithubServer {
     fn with_client(client: GithubClient) -> Self {
         Self {
             client: Arc::new(client),
+            events: None,
             tool_router: Self::tool_router(),
             usage_log: None,
         }
@@ -982,6 +986,23 @@ pub struct ReleaseCreateParams {
 
 #[rmcp::tool_router]
 impl KpGithubServer {
+    /// Register, list, remove, read, or acknowledge a private developer event
+    /// listener. Read supports a bounded wait. Acknowledgement is explicit;
+    /// event payloads and opaque acknowledgement tokens are returned intact.
+    /// Requires a configured receiver implementing the proposed v1 API.
+    #[rmcp::tool(name = "github_events")]
+    async fn github_events(&self, Parameters(request): Parameters<EventsRequest>) -> Result<CallToolResult, McpError> {
+        let client = self.events.as_ref().ok_or_else(|| McpError::invalid_request(
+            "Developer events are not configured. Run scripts/github_events_setup.py setup with your receiver's config bundle, then set KP_GITHUB_EVENTS_CONFIG to the saved profile.",
+            None,
+        ))?;
+        let result = client.execute(request).await
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        // These records are replay/ack protocol data. Generic GitHub response
+        // compression must not drop fields or abbreviate their identifiers.
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
     // ==================== Issues ====================
 
     /// List issues in a GitHub repository with token-compressed output
@@ -1725,7 +1746,7 @@ impl ServerHandler for KpGithubServer {
                 name: "kp-github-mcp".into(),
                 title: Some("Token-Compressed GitHub MCP Server".into()),
                 version: env!("CARGO_PKG_VERSION").into(),
-                description: Some("66-tool GitHub MCP server with 10-40x token compression via field projection, smart formatting, and 5-stage compression pipeline. Reqwest HTTP primary, gh CLI fallback.".into()),
+                description: Some("GitHub MCP server with compressed API tools and an optional private developer event listener. Reqwest HTTP primary, gh CLI fallback.".into()),
                 icons: None,
                 website_url: None,
             },
@@ -1888,8 +1909,9 @@ impl ServerHandler for KpGithubServer {
     }
 }
 
-pub async fn run(token: String) -> anyhow::Result<()> {
-    let server = KpGithubServer::new(&token);
+pub async fn run(token: String, events: Option<EventsClient>) -> anyhow::Result<()> {
+    let mut server = KpGithubServer::new(&token);
+    server.events = events;
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -1901,6 +1923,66 @@ mod tests {
     use serde_json::json;
 
     // ---- Server construction ----
+
+    #[tokio::test]
+    async fn test_events_without_config_is_explicit_and_keeps_github_tools() {
+        let server = KpGithubServer::new("synthetic-test-token");
+        let error = server.github_events(Parameters(EventsRequest::List)).await.unwrap_err();
+        assert!(error.message.contains("Developer events are not configured"));
+        assert!(server.tool_router.get("github_prs_get").is_some());
+        assert!(server.tool_router.get("github_events").is_some());
+        let tools = server.tool_router.list_all();
+        let events = tools.iter().find(|tool| tool.name == "github_events").unwrap();
+        assert_eq!(events.input_schema.get("type"), Some(&json!("object")));
+    }
+
+    #[tokio::test]
+    async fn test_events_tool_preserves_delivery_records_and_ack_is_explicit() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{body_json, header, method, path, query_param};
+
+        let receiver = MockServer::start().await;
+        let ack = "opaque-token-for-listener-a/do-not-shorten-or-parse==";
+        let record = json!({
+            "events": [{
+                "delivery_id": "5df19aa9-c9b4-45c6-9f66-3b7d2c5b8e81",
+                "ack_token": ack,
+                "head_sha": "0123456789abcdef0123456789abcdef01234567",
+                "kind": "ci_failed",
+                "raw_conclusion": "failure",
+                "current_head": null,
+                "workflow_attempt": 2,
+                "received_at": "2026-10-15T09:00:00.123Z"
+            }],
+            "next_cursor": "opaque-cursor=="
+        });
+        Mock::given(method("GET"))
+            .and(path("/v1/listeners/listener-a/events"))
+            .and(query_param("limit", "30"))
+            .and(query_param("wait_seconds", "0"))
+            .and(header("authorization", "Bearer synthetic-events-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .expect(1).mount(&receiver).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/listeners/listener-a/ack"))
+            .and(body_json(json!({"ack_tokens": [ack]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": 1})))
+            .expect(1).mount(&receiver).await;
+
+        let mut server = KpGithubServer::new("synthetic-github-token");
+        server.events = Some(EventsClient::with_test_token(&receiver.uri(), "synthetic-events-token"));
+        let result = server.github_events(Parameters(EventsRequest::Read {
+            listener_id: "listener-a".into(), limit: None, wait_seconds: None,
+        })).await.unwrap();
+        let returned: Value = serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(returned, record);
+        assert_eq!(receiver.received_requests().await.unwrap().len(), 1);
+
+        server.github_events(Parameters(EventsRequest::Ack {
+            listener_id: "listener-a".into(), ack_tokens: vec![ack.into()],
+        })).await.unwrap();
+        assert_eq!(receiver.received_requests().await.unwrap().len(), 2);
+    }
 
     #[test]
     fn test_server_new() {

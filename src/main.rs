@@ -1,5 +1,6 @@
 mod auth;
 mod compress;
+mod events;
 mod format;
 mod github;
 mod query;
@@ -22,10 +23,15 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("kp-github-mcp starting");
 
-    // Resolve auth
-    let token = auth::resolve_token()?;
+    // Configuration is local and cached; creating the events client makes no
+    // network requests. Its account selection also applies to GitHub tools.
+    let events = events::EventsClient::from_environment()?;
+    let token = match events.as_ref() {
+        Some(client) => auth::resolve_token_for_account(Some(client.github_account()))?,
+        None => auth::resolve_token()?,
+    };
     tracing::info!("GitHub auth resolved");
 
     // Start MCP server on stdio
-    server::run(token).await
+    server::run(token, events).await
 }
