@@ -77,8 +77,10 @@ panic locations and C source filenames do not depend on the developer's home.
 Compiler/SDK changes can still fail reproduction; such failures block the gate
 and require investigation, never automatic acceptance of new hashes.
 
-The tracked binaries currently retain their declared historical source until
-both native replacement artifacts are built and reviewed. They do not contain
-new unshipped source changes. Build a fresh consumer package to test those changes.
+The Linux payload has been rebuilt from the corrected account-scoping source.
+The macOS payload still declares its historical source and lacks those changes;
+its native replacement build and verification are pending. Do not publish a
+combined release until both platforms pass `verify --require-current`. Build
+a fresh consumer package to test source changes on either native platform.
 The publication job assembles both artifacts and validates their receipts against
 the publication checkout before committing them; it does not skip CI.
