@@ -28,15 +28,15 @@ python3 scripts/github_events_setup.py setup \
 
 Pasting a bundle avoids the GCS read; the listener connection still uses the developer's Google identity. An operator-provided JSON file also works with `--config-file path/to/shared-config.json`.
 
-Setup writes `~/.config/kp-github/events.json` and prints a launch command:
+Setup writes `~/.config/kp-github/events.json` and prints the shared HTTP installation command:
 
 ```sh
 KP_GITHUB_ACCOUNT=jw408 \
   KP_GITHUB_EVENTS_CONFIG="$HOME/.config/kp-github/events.json" \
-  kp-github-mcp
+  scripts/install.sh
 ```
 
-Use those same environment variables in the MCP host's server configuration. The runtime reads a profile only when explicitly configured. Its GitHub account is event metadata and never selects credentials for ordinary GitHub tools. A missing or malformed profile disables only the event tool. For several accounts, use the explicit registry described in [account selection](account-selection.md), with separate profile output paths and multiple `allowed_orgs` per profile. Existing GitHub operations use that developer's credentials; the event receiver independently authenticates the Google identity and verifies its GitHub/repository authorization. A name in a local profile is not an access grant.
+The installer saves those selectors on the shared local daemon and registers the MCP host over HTTP. Use `--no-register` for another host. The runtime reads a profile only when explicitly configured. Its GitHub account is a caller-supplied event namespace and never selects credentials for ordinary GitHub tools. A missing or malformed profile disables only the event tool. For several accounts, use the explicit registry described in [account selection](account-selection.md), with separate profile output paths and multiple `allowed_orgs` per profile. Existing GitHub operations use that developer's credentials; the event receiver independently authenticates the Google identity and checks its developer access policy against installed repository coverage. A name in a local profile is not an access grant.
 
 The helper creates private directories with mode `0700` and atomically writes files with mode `0600`. An existing output directory must already be private and owned by the current user; setup will not change permissions on an existing home, checkout, or other directory. Symlinks in the destination path or profile files are rejected. Use `--output` to choose a dedicated private directory for a separate profile.
 
@@ -85,4 +85,4 @@ For offline bootstrap tests, `--allow-http-loopback` permits HTTP only on `local
 
 ## Current delivery boundary
 
-The helper implements local configuration installation and packing. Live listener registration and event delivery additionally require the receiver's consumer API, identity mapping, and per-developer access to be deployed. A successfully written profile is evidence of local setup, not proof that those backend services are available or that a developer has been authorized.
+The helper implements local configuration installation and packing. Live listener registration and event delivery additionally require the receiver's consumer API, developer access policy, and per-developer access to be deployed. A successfully written profile is evidence of local setup, not proof that those backend services are available or that a developer has been authorized.

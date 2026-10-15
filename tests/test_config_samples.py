@@ -72,8 +72,7 @@ class ConfigSamplesTests(unittest.TestCase):
         for record in contract["developer_authorization_records"]:
             self.assertEqual(record["status"], "DISABLED_SAMPLE_ONLY_NOT_AN_ACCESS_GRANT")
             self.assertTrue(record["google_identity"]["subject"].startswith("ILLUSTRATIVE_"))
-            self.assertTrue(record["github_identity"]["user_id"].startswith("ILLUSTRATIVE_"))
-            self.assertTrue(record["github_identity"]["login"].startswith("ILLUSTRATIVE_"))
+            self.assertNotIn("github_identity", record)
             self.assertTrue(record["authorization_evidence"]["source"].startswith("TO_BE_PROVISIONED_"))
         self.assertFalse(contract["production_bootstrap_object"]["object_name"].startswith("everyone/github-events/samples/"))
 

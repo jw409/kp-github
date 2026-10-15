@@ -87,7 +87,7 @@ class ConsumerPackageTests(unittest.TestCase):
         with tarfile.open(archive, "r:gz") as tar:
             for member in tar.getmembers():
                 self.assertEqual((member.uid, member.gid, member.uname, member.gname, member.mtime), (0, 0, "", "", 0))
-                expected_mode = 0o755 if member.isdir() or member.name.endswith(("bin/kp-github-mcp", "scripts/github_events_setup.py", "scripts/setup_shared_http.py")) else 0o644
+                expected_mode = 0o755 if member.isdir() or member.name.endswith(("bin/kp-github-mcp", "scripts/github_events_setup.py", "scripts/setup_shared_http.py", "scripts/install_local_http.py", "scripts/install.sh")) else 0o644
                 self.assertEqual(member.mode, expected_mode)
                 self.assertTrue(member.isfile() or member.isdir())
                 self.assertFalse(PurePosixPath(member.name).is_absolute())

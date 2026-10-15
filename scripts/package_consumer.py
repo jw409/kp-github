@@ -27,6 +27,8 @@ _SPEC.loader.exec_module(_provenance)
 REQUIRED_FILES = (
     "scripts/github_events_setup.py",
     "scripts/setup_shared_http.py",
+    "scripts/install_local_http.py",
+    "scripts/install.sh",
     "docs/shared-local-server.md",
     "docs/developer-events-setup.md",
     "docs/listener-api.md",
@@ -55,13 +57,18 @@ is changed by packaging or extraction.
 Verify the archive's .sha256 sidecar before extraction, then verify SHA256SUMS
 inside the extracted package. Read docs/consumer-package.md for commands.
 
+Stock installation uses one supervised local HTTP server. Run
+scripts/install.sh --github-account YOUR_GITHUB_LOGIN (or --accounts-config FILE).
+This explicitly installs a user service and registers Claude Code over HTTP.
+Use --no-register for another MCP host. Read docs/shared-local-server.md.
+
 The executable is bin/kp-github-mcp. The Python 3 standard-library helper is
 scripts/github_events_setup.py; its --help works without a source checkout.
 Use your own existing gh and gcloud credentials. App signing keys, webhook
 secrets, tokens, and local profiles are not included.
 
 Event delivery still requires your operator's deployed consumer API and
-verified identity mapping. See docs/listener-api.md for that boundary.
+developer access policy. See docs/listener-api.md for that boundary.
 """.encode()
 
 

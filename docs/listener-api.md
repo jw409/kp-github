@@ -1,7 +1,7 @@
 # Developer event consumers: proposed v1 protocol
 
 **Status: client implemented and fake-service tested; receiver agreement, deployment,
-identity linking, and end-to-end delivery remain pending.** This document proposes
+developer access policy, and end-to-end delivery remain pending.** This document proposes
 the contract for Meshly's existing receiver owner. It does not describe a deployed
 consumer service. The GitHub webhook ingress URL is not automatically a consumer
 API endpoint.
@@ -72,19 +72,63 @@ The receiver must independently verify Google's signature, issuer, expiry,
 audience, verified identity, and access. Decoding a JWT locally is not verification.
 The receiver or its gateway must deliberately support the human gcloud token
 audience; an arbitrary Cloud Run service audience or IAP client ID does not become
-compatible merely by writing it into this profile. If the chosen ingress cannot
-accept these human tokens, the receiver owner must implement a supported user
-login/token-exchange flow before this client can be enabled. Distributing a shared
-service account key is not the fallback.
+compatible merely by writing it into this profile. Choose an ingress and verifier
+that support these existing human credentials, and test the actual accepted
+audience before publishing configuration. A new interactive login portal, account
+linking flow, or shared service account key is not part of this design.
 
-The receiver must bind the authenticated Google subject to a verified GitHub
-identity, through a separately implemented account-linking flow or an audited
-operator mapping. It must check that identity's authorization to the installed
-organization/repository and scope every listener and delivery to that consumer.
-The local `allowed_orgs` field is only a convenience guard. It is not authorization,
-and neither an email supplied by a caller nor `github_account` in a local file is
-proof of identity. Existing listener IDs and ack tokens must not grant access to
-a different authenticated consumer.
+## Receiver ownership and authorization
+
+The existing GCP receiver owned by `github-actions-runner` implements the consumer
+API below alongside its GitHub webhook ingress. The developer-local HTTP server
+is an MCP transport shared by local sessions; it does not receive GitHub webhooks
+or grant remote access. Its private bearer key never authenticates to GCP.
+Keep GitHub webhook ingress authenticated by the App webhook signature; authenticate
+consumer routes separately with Google identity. Do not require Google login on
+the webhook route, which GitHub must be able to call. A separate IAM-protected
+consumer service or application-level verification on the existing receiver are
+valid deployment choices; the receiver owner selects the ingress boundary.
+
+**No Google-to-GitHub linking flow, pair registration, or GitHub credential upload
+is required.** Developers independently choose stored `gh` and `gcloud` accounts.
+GitHub credentials stay local and authenticate ordinary GitHub API calls directly.
+The selected Google identity authenticates event consumption to the GCP receiver.
+Changing the GitHub selector never changes the Google principal's access.
+
+The receiver owner implements these checks:
+
+1. Verify the Google ID token as described above and resolve its stable `(iss, sub)`.
+2. Require membership in Meshly's configured developer access policy. This can be
+   backed by the existing Google/IAM access mechanism or an explicit principal/group
+   policy. A valid token from an arbitrary Google account is not sufficient. A
+   gateway must pass a verified identity through a trusted boundary; never trust
+   caller-supplied forwarded identity headers. Reading the GCS bootstrap object is
+   configuration delivery, not an event access grant.
+3. Intersect that policy's org/repo scope with the receiver's onboarded App
+   installation/repository set. Meshly may grant its developer group all installed
+   repositories in Meshlyai and Meshly-Open-Source. That is an intentional event
+   access grant independent of each developer's GitHub repository permissions.
+   Future orgs need explicit onboarding and policy scope; installing the public
+   App alone does not enroll an unrelated organization in Meshly's service.
+4. Scope listener ownership, idempotency, deliveries and acks to the verified
+   Google principal and the requested account namespace. Deny access across
+   Google principals even when the namespace or listener ID matches. Apply
+   current policy on reads/acks as well as registration; removed grants or
+   uninstalled repositories cannot continue disclosing queued private events.
+
+The App installation establishes the organization's authorization of the App's
+repository access; it does not authenticate the caller of this separate API.
+`X-KP-GitHub-Account` is an untrusted **namespace label**, never proof of GitHub
+identity or an authorization input. Record it as caller-supplied attribution in
+audits, alongside the verified Google principal. Account namespaces separate
+queues for convenience within one principal, not a security boundary between
+identities controlled by the same developer. Names in local profiles and
+`allowed_orgs` are convenience guards and cannot widen the receiver policy.
+
+GitHub documents the distinction between [installation authorization](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation)
+and [user authorization](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app).
+This contract uses the former for capture and Google authorization for consumers;
+it does not claim to mirror per-user GitHub ACLs.
 
 ## Cache and failure behavior
 
@@ -184,15 +228,18 @@ properties before an operational endpoint/audience can be published to developer
 ## Multiple GitHub identities and organizations
 
 Every consumer request includes `X-KP-GitHub-Account`, the selected profile's
-GitHub login. This is a requested identity, **not proof of ownership**. The
-receiver must require a verified link from the authenticated Google subject to
-that GitHub identity, reject unknown links, and scope listener ownership and
-acks to that pair. If one Google subject has several linked GitHub accounts,
-it must not silently choose one or ignore this header. Receiver deployment and
-acceptance of this selector remain part of the pending receiver contract.
+GitHub login used as an account namespace. Accept any syntactically valid account
+label for an authorized Google principal; do not look it up in a linked-account
+table or infer GitHub identity from it. Case-fold labels consistently. Pairing
+one Google login with several GitHub accounts, or vice versa, needs no registration.
+Each local account profile selects its own Google login and org set. Different
+Google principals retain separate listener state; it is not transferred merely
+because their GitHub labels match.
 
 Profiles may list several `allowed_orgs`, including future onboarded orgs.
-Registration still names an explicit owner/repo. Installation access and current
-repository authorization are enforced at the receiver; local account and org
-lists grant no server permission. Cursors, listener IDs and ack tokens from one
-account must not be usable by another, even when the accounts share an org.
+Registration names an explicit owner/repo. The receiver enforces developer access
+policy and installed repository coverage, independently of local account sets.
+Acceptance tests must include a permitted Google principal using two arbitrary
+account labels without preregistration, denial of an unpermitted principal using
+an existing label, denial outside policy/installation scope, isolation of reads
+and acks across principals/namespaces, and grant/installation removal.

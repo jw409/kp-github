@@ -1,6 +1,7 @@
 # Sharing one local server across sessions
 
-The default stdio transport starts a separate server for every MCP client.
+The stock installer starts one supervised Streamable HTTP server per user.
+The raw executable still supports stdio with no arguments for existing clients.
 `--http` runs one independent process with a Streamable HTTP endpoint. Clients
 connect directly to it without starting a per-session proxy. Claude Code supports
 this transport: https://code.claude.com/docs/en/mcp#option-1-add-a-remote-http-server .
@@ -29,50 +30,70 @@ A local bearer key grants all accounts explicitly enabled on that daemon,
 including their write tools. It is distinct from GitHub, Google and App
 credentials. Only sessions intended to share that authority should share a key.
 
-## Prepare and run
+## Stock installation
 
-Build from this checkout; checked-in platform binaries may predate this mode:
+From a source checkout or an extracted consumer archive:
 
 ```sh
-cargo build --locked --release
-python3 scripts/setup_shared_http.py
+scripts/install.sh --github-account YOUR_GITHUB_LOGIN
+# For multiple accounts instead:
+scripts/install.sh --accounts-config /absolute/path/accounts.json
 ```
 
-Setup writes `~/.config/kp-github/shared/http.key` and `mcp.json` with mode 0600 in
-a mode-0700 directory. It reuses a valid existing key, and neither starts a service
-nor edits any MCP host configuration. Do not commit either generated file.
+An extracted archive uses its included executable. A checkout builds from source
+with Cargo. Python 3, `gh`, and a running systemd user manager (Linux) or a GUI
+launchd session (macOS) are required; event tools additionally use `gcloud`.
+GitHub/Google logins already stored by those tools are reused. Setup never opens
+a browser or changes either CLI's active account.
 
-Start the server once, with your stored GitHub login selected explicitly:
+The installer copies the binary and its helper scripts to private, content-named
+paths in `~/.config/kp-github/shared`, creates or reuses `http.key`, and installs
+`kp-github.service` (Linux) or `ai.kp-github` (macOS). The service starts now and at
+user login. Existing binaries are replaced atomically, never truncated in place.
+All service configuration/key files are mode 0600 in a mode-0700 directory.
+
+After an authenticated local MCP readiness check, installation registers a
+user-scoped `kp-github` HTTP entry with Claude Code. It replaces only that named
+user entry; other entries remain intact. Claude's
+[headersHelper](https://code.claude.com/docs/en/mcp#use-dynamic-headers-for-custom-authentication)
+reads the private key locally, so the key does not enter command arguments.
+If host registration fails, the running service and generated private client
+configuration remain available; repair registration before starting new sessions.
+Use `--no-register` to install the service for another MCP host.
+
+Account selections come from explicit `--github-account`, `--accounts-config`,
+`--events-config` flags or their `KP_GITHUB_*` environment equivalents. On a repeat
+installation without selectors, the saved selection is retained. No stored `gh`
+default or ambient GitHub token is inferred. Use `--events-config PATH` for a
+single account, or per-account profile paths in the registry. Each event profile
+can independently select an existing Google login and multiple organizations;
+there is no remote account-pair registration.
+
+The installer saves the selected configuration paths and PATH, never tokens. The
+service reads stored credentials when needed. A repeat install with identical
+configuration reuses the daemon and its key; a changed executable/configuration
+restarts that service. Changes inside a referenced account registry or event
+profile require an explicit service restart; the installer does not poll files.
+Concurrent installers are rejected. An unrelated occupied port is not adopted
+or terminated. Choose `--port PORT` to override 18766; later installs retain it.
+
+Linux status/restart: `systemctl --user status kp-github.service` /
+`systemctl --user restart kp-github.service`. macOS status/restart:
+`launchctl print gui/$(id -u)/ai.kp-github` /
+`launchctl kickstart -k gui/$(id -u)/ai.kp-github`.
+The launchd unit is covered by configuration tests; native macOS service execution
+and a rebuilt macOS binary remain pending on this Linux development machine.
+
+For manual supervision, the preparation-only helper remains available:
 
 ```sh
+python3 scripts/setup_shared_http.py
 KP_GITHUB_ACCOUNT=YOUR_GITHUB_LOGIN \
-  target/release/kp-github-mcp \
-  --http 127.0.0.1:18766 \
+  /absolute/path/kp-github-mcp --http 127.0.0.1:18766 \
   --http-token-file "$HOME/.config/kp-github/shared/http.key"
 ```
 
-For events, set `KP_GITHUB_EVENTS_CONFIG` on this daemon as well. Keep the daemon
-running with your usual user service supervisor. Example systemd user unit, after
-installing the freshly built executable at the shown path:
-
-```ini
-[Unit]
-Description=Shared local GitHub MCP server
-
-[Service]
-ExecStart=%h/.local/bin/kp-github-mcp --http 127.0.0.1:18766 --http-token-file %h/.config/kp-github/shared/http.key
-Environment=KP_GITHUB_ACCOUNT=YOUR_GITHUB_LOGIN
-Restart=on-failure
-RestartSec=2
-UMask=0077
-
-[Install]
-WantedBy=default.target
-```
-
-The unit is an example, not an installed service. If `gh`/`gcloud` are outside the
-user manager's PATH, set PATH in the unit. Use a stable installed binary path;
-rebuilds should not replace a running executable in place.
+That helper only writes `http.key` and `mcp.json`; it starts nothing.
 
 ## Connect clients and migrate
 
@@ -85,8 +106,10 @@ otherwise the plugin still starts its old stdio child. Preserve other MCP entrie
 
 Reconnect each session when convenient. Existing stdio pipes cannot be converted
 into HTTP connections in place, so killing the nine old children first would
-interrupt their clients. This implementation does not edit installed plugin
-caches, kill clients, or alter machine-wide gh/gcloud defaults.
+interrupt their clients. The installer does not edit installed plugin caches or project-scoped entries,
+kill stdio clients, or alter machine-wide gh/gcloud defaults. A combined consumer
+plugin must switch its own kp-github entry to HTTP as part of its integration;
+installing this module cannot rewrite a separately owned plugin.
 
 The daemon binds only a literal loopback IP. Every request checks the bearer key,
 Host and any Origin header. Requests are limited to 8 MiB and 256 active sessions.

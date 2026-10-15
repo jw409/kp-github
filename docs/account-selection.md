@@ -1,6 +1,8 @@
 # Accounts and organizations
 
-Use an explicit process default for work that must stay on one identity:
+The stock installer uses shared HTTP and saves an explicit account or registry;
+see [installation](shared-local-server.md). For a manually launched process, use
+an explicit process default for work that must stay on one identity:
 
 ```sh
 KP_GITHUB_ACCOUNT=jw408 kp-github-mcp
@@ -43,7 +45,9 @@ must be an absolute path. Configure each profile with `github_events_setup.py
 setup --github-account ACCOUNT --output ABSOLUTE_PATH ...`. Each profile can
 list multiple organizations in `allowed_orgs`; accounts may share organizations.
 Its `github_account` must match the enclosing entry. Each account may choose its
-own Google identity and receiver. A bad profile disables only that entry's events.
+own Google identity and receiver, without registering a GitHub/Google pair.
+The receiver authorizes the Google principal through its developer policy and
+uses the GitHub label only to separate listener state. A bad profile disables only that entry's events.
 The single-profile `KP_GITHUB_EVENTS_CONFIG` variable is ignored in this mode.
 
 The file is an explicit allowlist of credentials this process may use; it is

@@ -7,7 +7,7 @@ tokens the raw API returns, and surfaces the fields agents actually act on
 
 Binary: `kp-github-mcp`.
 
-Several sessions on one machine can use the optional [shared local HTTP server](docs/shared-local-server.md), with separate MCP sessions and explicit request-scoped accounts and separate event profiles. The default transport remains stdio.
+Stock installation uses one [shared local HTTP server](docs/shared-local-server.md) per user, with separate MCP sessions, request-scoped accounts and separate event profiles. The raw executable retains no-argument stdio compatibility for explicitly configured hosts.
 
 ## Build
 
@@ -19,10 +19,16 @@ cargo build --release   # -> target/release/kp-github-mcp
 ## Use
 
 ```sh
-claude mcp add kp-github --transport stdio -- /path/to/kp-github-mcp
+scripts/install.sh --github-account YOUR_GITHUB_LOGIN
+# Or: scripts/install.sh --accounts-config /absolute/path/accounts.json
 ```
 
-Select a stored account for this process with `KP_GITHUB_ACCOUNT=jw408`, or use
+The installer starts a systemd user service on Linux or a launchd agent on macOS
+and registers Claude Code over local HTTP. Use `--no-register` for another MCP
+host. It requires an explicit account or account registry and never changes CLI
+account defaults. Existing stdio sessions continue until you reconnect.
+
+For a manually launched executable, select a stored account for this process with `KP_GITHUB_ACCOUNT=jw408`, or use
 `GH_TOKEN`, then `GITHUB_TOKEN`, then the existing `gh` default. Event profiles
 never choose credentials for ordinary GitHub tools. For multiple accounts and
 organizations in one process, explicitly enable `KP_GITHUB_ACCOUNTS_CONFIG` and

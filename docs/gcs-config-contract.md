@@ -15,7 +15,7 @@ The sample prefix mirrors the filenames in [examples/github-events](../examples/
 
 `receiver-inputs.sample.json` is a separate operator input contract. It records App `5327950` (`meshly-open-source-dev-events`), the two allowed organization installations, the existing `meshly-github-runners` dispatcher context, proposed dedicated Secret Manager names, and missing receiver outputs. It intentionally fails developer bundle validation. Secret-version placeholders must become explicit numeric versions; neither secret contents nor a `latest` binding belong in this input contract. The receiver owner must integrate these references without overwriting the existing runner App's secrets.
 
-Its developer authorization example is deliberately disabled and uses illustrative identifiers. The required mapping binds a verified Google issuer/subject to a stable GitHub numeric user ID and login, with explicit allowed organization/repository scopes and a reference to a verified link or approved operator record. A developer's local profile names are not identity evidence. Future organizations require an explicit App installation allowlist entry and explicit developer scope approval; the receiver must not infer access from an arbitrary supplied organization or login. No actual developer mapping or grant is created by these examples.
+Its developer authorization example is deliberately disabled and uses illustrative Google principals and organization/repository scopes. The owner should reuse the existing Meshly developer access policy, with verified Google subjects or group membership. No Google-to-GitHub mapping is required: the GitHub account header is only a caller-supplied namespace. Policy may grant Meshly developers all onboarded installed repositories; that is event access independent of individual GitHub ACLs. Future organizations require explicit onboarding, installation coverage and policy scope. No actual grant is created by these examples. The operator input contract is version 2; the developer bundle remains version 1.
 
 ## Exact production object format
 
@@ -62,7 +62,7 @@ These are proposed names and types for the owner's module, not Terraform declara
 | `developer_reader_members` | Explicit approved IAM principals/groups for the exact-object conditional reader binding |
 | `publisher_principal` | Existing or explicitly provisioned operator identity with publication permission, maintained separately from readers |
 | `receiver_app_secret_references` | Dedicated Secret Manager names and explicit numeric versions; receiver-only inputs, excluded from the developer object |
-| `developer_authorization_records` | Verified Google issuer/subject mapped to stable GitHub user ID/login, explicit organization/repository scopes, and provenance from verified linking or an approved operator record; excluded from the shared bundle |
+| `developer_authorization_records` | Verified Google principals or existing developer group policy, explicit organization/repository scopes, and access-policy evidence; no linked GitHub identities; excluded from the shared bundle |
 | `bucket_state_owner` | Existing authoritative state/owner reference for coordinating versioning, lifecycle, IAM, and publication changes |
 
 | Output/evidence | Purpose |
@@ -76,8 +76,8 @@ These are proposed names and types for the owner's module, not Terraform declara
 | `github_events_token_audience` | The receiver-approved actual emitted audience |
 | `github_events_reader_condition` | Final exact-object condition and bound principal list, retained as deployment evidence |
 
-The final developer command uses the published output URI, an existing `gh` account, and their selected Google account. Setup trusts a valid local cache; changing the published generation does not force every developer to re-fetch. Operators distribute an explicit refresh instruction when configuration changes. A user's local GitHub name and configured organization list do not grant backend access; the receiver must verify the Google identity and mapped GitHub/repository authorization.
+The final developer command uses the published output URI, an existing `gh` account, and their selected Google account. Setup trusts a valid local cache; changing the published generation does not force every developer to re-fetch. Operators distribute an explicit refresh instruction when configuration changes. A user's local GitHub name and configured organization list do not grant backend access; the receiver must verify the Google identity and developer access policy and installed repository coverage.
 
 ## Acceptance boundary
 
-Local sample tests establish format compatibility and reject secret-bearing or operator-only inputs. They do not establish publication, developer IAM, Google-to-GitHub identity mapping, receiver deployment, or event delivery. The infrastructure owner should record the production generation/hash and a known-object read with an intended developer identity, then separately verify authenticated registration and event consumption. Object versioning and rollback policy remain with that owner; the consumer does not need bucket listing permission for these checks.
+Local sample tests establish format compatibility and reject secret-bearing or operator-only inputs. They do not establish publication, developer IAM, developer authorization, receiver deployment, or event delivery. The infrastructure owner should record the production generation/hash and a known-object read with an intended developer identity, then separately verify authenticated registration and event consumption. Object versioning and rollback policy remain with that owner; the consumer does not need bucket listing permission for these checks.

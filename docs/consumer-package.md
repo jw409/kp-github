@@ -18,9 +18,9 @@ python3 scripts/github_events_setup.py --help
 
 On macOS, use `shasum -a 256 -c` in place of `sha256sum -c`. The checksum files detect corruption; trust depends on the workflow/source you downloaded them from. Linux packages built on `ubuntu-latest` require a compatible glibc runtime; they are not static or universal Linux binaries. Select the matching architecture.
 
-Use the operator's bundle or known GCS object with the setup helper, following [developer setup](developer-events-setup.md). Configure your MCP host to launch the absolute path to the extracted `bin/kp-github-mcp` and set the profile/account environment variables printed by setup. This archive does not install a machine-wide executable or alter the host's MCP configuration. `gh` and, for events, `gcloud` are external prerequisites using your own logins.
+Use the operator's bundle or known GCS object with the setup helper, following [developer setup](developer-events-setup.md). Then run `scripts/install.sh --github-account YOUR_GITHUB_LOGIN --events-config /absolute/path/events.json`, or `scripts/install.sh --accounts-config /absolute/path/accounts.json`. The stock installer starts a shared local HTTP user service and registers Claude Code; use `--no-register` for another host. Extraction alone changes no installed configuration. `gh` and, for events, `gcloud` are external prerequisites using your own logins.
 
-Ordinary GitHub tools work without an events profile. Listener registration and delivery additionally require a deployed consumer API and verified identity mapping described in [the listener protocol](listener-api.md). The webhook ingress URL alone is not that API. An open source adopter supplies its own app and receiver unless explicitly onboarded to Meshly's instance.
+Ordinary GitHub tools work without an events profile. Listener registration and delivery additionally require a deployed consumer API and developer access policy described in [the listener protocol](listener-api.md). The webhook ingress URL alone is not that API. An open source adopter supplies its own app and receiver unless explicitly onboarded to Meshly's instance.
 
 ## Build an archive locally
 
@@ -56,8 +56,9 @@ The **Consumer Packages** workflow uploads artifacts for review without reposito
 
 For several sessions sharing explicitly enabled accounts and organizations on a machine, see
 [shared local HTTP](shared-local-server.md). The archive includes
-`scripts/setup_shared_http.py`; it creates a private local bearer key and HTTP
-client configuration without changing installed MCP settings.
+`scripts/install.sh` and `scripts/install_local_http.py` for stock installation.
+The preparation-only `scripts/setup_shared_http.py` remains available for manual
+supervision. The package is a developer client, not the GCP webhook receiver.
 
 ## Checked-in binaries
 

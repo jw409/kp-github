@@ -427,9 +427,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             path, profile, reused = setup(args)
             print("Reused cached developer configuration." if reused else "Saved developer configuration.")
-            print("Launch with your selected account:")
+            print("Install or update the shared local HTTP server with your selected account:")
             print("KP_GITHUB_ACCOUNT=" + shlex.quote(profile["github_account"]) +
-                  " KP_GITHUB_EVENTS_CONFIG=" + shlex.quote(str(path)) + " kp-github-mcp")
+                  " KP_GITHUB_EVENTS_CONFIG=" + shlex.quote(str(path)) + " " + shlex.quote(str(Path(__file__).resolve().with_name("install.sh"))))
             print("The receiver verifies access when you connect; this profile does not grant access.")
         return 0
     except SetupError as error:
