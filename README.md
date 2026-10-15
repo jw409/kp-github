@@ -45,11 +45,16 @@ other adopters deploy their own receiver and app.
 
 ## Relationship to kinderpowers
 
-Extracted from [jw409/kinderpowers](https://github.com/jw409/kinderpowers),
-which consumes this repo as a submodule at `mcp-servers/github` and ships a
-pre-built binary at `mcp-servers/bin/kp-github-mcp`. The plugin's `plugin.json`
-points at that binary, so **installing the plugin does not require this repo** —
-it's a build-time dependency only.
+The [kinderpowers marketplace](https://github.com/jw409/kinderpowers) offers this
+repository directly as the `kp-github` plugin. Its `bin/kp-github-mcp` wrapper
+selects the checked-in Linux x86_64 or macOS arm64 binary.
 
-Source changes land here; kinderpowers then bumps its submodule pointer and
-rebuilds binaries via its `mcp-v*` tag workflow.
+The combined `kinderpowers` plugin mounts this repository at
+`mcp-servers/github`; its wrapper runs the binaries inside that pinned submodule.
+The submodule is required at runtime. Updating the consumer therefore means
+publishing matching binaries here and advancing its submodule pin.
+
+For a standalone archive with the setup helper, documentation, sample config,
+and provenance, see [consumer packages](docs/consumer-package.md). The
+[GCS configuration contract](docs/gcs-config-contract.md) supplies samples and
+inputs for the receiver owner's Terraform implementation.
