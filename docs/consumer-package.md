@@ -69,7 +69,8 @@ python3 scripts/binary_provenance.py reproduce --platform linux-x86_64
 
 The first check validates both tracked payloads against their declared source
 receipts and is part of ordinary Python test discovery. The second additionally
-rejects stale binaries after a source change. The third builds the declared
+rejects stale binaries after a source change and runs for each platform in CI.
+The third builds the declared
 revision from scratch and requires identical bytes; use `macos-arm64` on a
 native macOS runner. Full Git history and the receipt's exact Rust toolchain are
 required. Cargo registry paths are normalized to the native Actions paths so
@@ -82,5 +83,9 @@ The macOS payload still declares its historical source and lacks those changes;
 its native replacement build and verification are pending. Do not publish a
 combined release until both platforms pass `verify --require-current`. Build
 a fresh consumer package to test source changes on either native platform.
+The macOS provenance CI job will fail closed until its payload is refreshed.
+An explicit feature-branch **Build Binaries** dispatch produces both native
+artifacts and receipts without committing to main. Download those artifacts,
+run `assemble --artifacts DIRECTORY`, and commit the verified pair for review.
 The publication job assembles both artifacts and validates their receipts against
 the publication checkout before committing them; it does not skip CI.

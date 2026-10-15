@@ -64,4 +64,5 @@ jobs:
       - name: Check both payloads and reproduce native declared source
         run: |
           python3 scripts/binary_provenance.py verify
+          python3 scripts/binary_provenance.py verify --platform ${{ matrix.platform }} --require-current
           python3 scripts/binary_provenance.py reproduce --platform ${{ matrix.platform }}
