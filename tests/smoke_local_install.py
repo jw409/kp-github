@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--installer', type=Path, default=Path(__file__).resolve().parents[1] / 'scripts/install_local_http.py')
     parser.add_argument('--claude', type=Path, required=True)
+    parser.add_argument('--entrypoint', type=Path, help='Exercise the extracted archive install.sh too')
     args = parser.parse_args()
     script = args.installer.resolve()
     sys.path.insert(0, str(script.parent))
@@ -85,8 +86,9 @@ print('synthetic-local-github-token')
             for name in ('unrelated-test-server', 'kp-github'):
                 run([str(args.claude), 'mcp', 'add-json', '--scope', 'user', name,
                      json.dumps({'type': 'stdio', 'command': '/bin/echo', 'args': ['fixture']})])
-            call = [sys.executable, str(script), '--binary', str(args.binary.resolve()),
-                    '--directory', str(shared), '--github-account', 'synthetic-dev', '--port', str(port)]
+            call = ([str(args.entrypoint.resolve())] if args.entrypoint else
+                    [sys.executable, str(script), '--binary', str(args.binary.resolve())])
+            call += ['--directory', str(shared), '--github-account', 'synthetic-dev', '--port', str(port)]
             first = run(call)
             pid = int((root / 'service-pid').read_text())
             config = json.loads((shared / 'service.json').read_text())
