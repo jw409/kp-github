@@ -64,7 +64,9 @@ def check_mcp(env, expected_error):
 
 
 with tempfile.TemporaryDirectory(prefix='kp-events-smoke-') as temporary:
-    directory = Path(temporary)
+    # macOS exposes its temp root through /var -> /private/var. Resolve only
+    # our newly-created fixture path; production profile symlink checks stay on.
+    directory = Path(temporary).resolve()
     bin_dir = directory / 'bin'
     bin_dir.mkdir()
     log = directory / 'calls'
@@ -92,7 +94,7 @@ exit 23
         'setup', '--config-file', str(shared), '--github-account', 'profile-dev',
         '--google-account', 'developer@example.com', '--output', str(profile)],
         capture_output=True, text=True, timeout=10)
-    assert setup.returncode == 0, 'Setup failed'
+    assert setup.returncode == 0, 'Synthetic setup failed: ' + setup.stderr[:2000]
     base = {'PATH': str(bin_dir) + os.pathsep + os.environ['PATH'],
             'GH_TOKEN': 'synthetic-ambient-gh', 'GITHUB_TOKEN': 'synthetic-ambient-github',
             'SMOKE_CALLS': str(log)}
