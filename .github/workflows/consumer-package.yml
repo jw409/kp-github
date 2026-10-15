@@ -8,10 +8,13 @@ on:
       - 'Cargo.lock'
       - 'scripts/package_consumer.py'
       - 'scripts/github_events_setup.py'
+      - 'scripts/setup_shared_http.py'
       - 'docs/**'
       - 'examples/github-events/**'
       - 'tests/test_consumer_package.py'
       - 'tests/smoke_consumer.py'
+      - 'tests/smoke_shared_http.py'
+      - 'tests/test_shared_http_setup.py'
       - '.github/workflows/consumer-package.yml'
   push:
     tags: ['v*']
@@ -55,6 +58,8 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Smoke test the native binary without live credentials
         run: python3 tests/smoke_consumer.py --binary target/${{ matrix.target }}/release/kp-github-mcp
+      - name: Smoke shared local server
+        run: python3 tests/smoke_shared_http.py --binary target/${{ matrix.target }}/release/kp-github-mcp -v
       - name: Package binary, setup helper, and documentation
         env:
           SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}

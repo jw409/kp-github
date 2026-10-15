@@ -31,7 +31,7 @@ class ConsumerPackageTests(unittest.TestCase):
         for relative in package.REQUIRED_FILES:
             destination = self.source / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            if relative == "scripts/github_events_setup.py":
+            if relative.startswith("scripts/"):
                 shutil.copyfile(REPOSITORY / relative, destination)
             else:
                 destination.write_text(f"Fixture documentation: {relative}\n")
@@ -82,7 +82,7 @@ class ConsumerPackageTests(unittest.TestCase):
         with tarfile.open(archive, "r:gz") as tar:
             for member in tar.getmembers():
                 self.assertEqual((member.uid, member.gid, member.uname, member.gname, member.mtime), (0, 0, "", "", 0))
-                expected_mode = 0o755 if member.isdir() or member.name.endswith(("bin/kp-github-mcp", "scripts/github_events_setup.py")) else 0o644
+                expected_mode = 0o755 if member.isdir() or member.name.endswith(("bin/kp-github-mcp", "scripts/github_events_setup.py", "scripts/setup_shared_http.py")) else 0o644
                 self.assertEqual(member.mode, expected_mode)
                 self.assertTrue(member.isfile() or member.isdir())
                 self.assertFalse(PurePosixPath(member.name).is_absolute())
@@ -116,6 +116,11 @@ class ConsumerPackageTests(unittest.TestCase):
                                 cwd=extracted, env={}, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("setup", result.stdout)
+        shared = subprocess.run([sys.executable, str(root / "scripts/setup_shared_http.py"),
+                                 "--directory", str((self.directory / "shared").resolve())],
+                                cwd=extracted, env={}, capture_output=True, text=True, timeout=10)
+        self.assertEqual(shared.returncode, 0, shared.stderr)
+        self.assertTrue((self.directory / "shared/http.key").is_file())
 
     def test_private_and_unlisted_files_never_enter_archive_or_manifest(self):
         for relative in (".config/events.json", "credentials.json", "private-key.pem",

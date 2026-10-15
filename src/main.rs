@@ -5,6 +5,7 @@ mod format;
 mod github;
 mod query;
 mod server;
+mod shared_http;
 mod tools;
 pub mod util;
 
@@ -12,6 +13,14 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let mode = shared_http::Mode::parse(std::env::args().skip(1))?;
+    if matches!(mode, shared_http::Mode::Help) {
+        println!("{}", shared_http::HELP);
+        return Ok(());
+    }
+    // Read/validate the local HTTP key before looking up any GitHub credential.
+    let http = mode.prepare()?;
+
     // Initialize tracing to stderr (MCP uses stdout for JSON-RPC)
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -32,6 +41,8 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing::info!("GitHub auth resolved");
 
-    // Start MCP server on stdio
-    server::run(token, events).await
+    match http {
+        Some(config) => shared_http::run(server::configured(&token, events), config).await,
+        None => server::run(token, events).await,
+    }
 }

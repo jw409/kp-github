@@ -40,3 +40,8 @@ The packager requires a nonempty executable file. It reads the checkout's actual
 With identical source revision/state, payload bytes, binary, and target, repeated packaging produces identical archive bytes. Archive paths are relative beneath one fixed package directory; permissions, ownership, ordering, gzip header, and timestamps are normalized. The explicit payload allowlist excludes unlisted checkout files, private configuration, credentials, caches, and Git metadata. Optional example files are included only when present under their documented names.
 
 The **Consumer Packages** workflow uploads artifacts for review without repository write permissions. The older **Build Binaries** workflow retains marketplace publication only for an explicit dispatch on `main`; feature and tag builds cannot commit to `main`, and publication fails if `main` advanced after its source was built.
+
+For several sessions sharing one selected account/profile on a machine, see
+[shared local HTTP](shared-local-server.md). The archive includes
+`scripts/setup_shared_http.py`; it creates a private local bearer key and HTTP
+client configuration without changing installed MCP settings.

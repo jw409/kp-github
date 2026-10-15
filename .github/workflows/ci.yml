@@ -32,3 +32,7 @@ jobs:
       - name: Test GitHub App registration and developer setup
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
       - run: cargo build --release
+      - name: Smoke shared local server and existing stdio transport
+        run: |
+          python3 tests/smoke_shared_http.py --binary target/release/kp-github-mcp -v
+          python3 tests/smoke_consumer.py --binary target/release/kp-github-mcp

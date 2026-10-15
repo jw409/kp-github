@@ -31,16 +31,17 @@ use crate::tools;
 /// legitimately slow single request still completes.
 const GLOBAL_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
 
+#[derive(Clone)]
 pub struct KpGithubServer {
     client: Arc<GithubClient>,
-    events: Option<EventsClient>,
+    events: Option<Arc<EventsClient>>,
     tool_router: ToolRouter<Self>,
     /// Opt-in usage sink (`KP_GITHUB_USAGE_LOG`). `None` = disabled, zero overhead.
     usage_log: Option<Arc<std::sync::Mutex<std::fs::File>>>,
 }
 
 impl KpGithubServer {
-    fn new(token: &str) -> Self {
+    pub(crate) fn new(token: &str) -> Self {
         Self {
             client: Arc::new(GithubClient::new(token)),
             events: None,
@@ -1909,9 +1910,14 @@ impl ServerHandler for KpGithubServer {
     }
 }
 
+pub(crate) fn configured(token: &str, events: Option<EventsClient>) -> KpGithubServer {
+    let mut server = KpGithubServer::new(token);
+    server.events = events.map(Arc::new);
+    server
+}
+
 pub async fn run(token: String, events: Option<EventsClient>) -> anyhow::Result<()> {
-    let mut server = KpGithubServer::new(&token);
-    server.events = events;
+    let server = configured(&token, events);
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -1970,7 +1976,7 @@ mod tests {
             .expect(1).mount(&receiver).await;
 
         let mut server = KpGithubServer::new("synthetic-github-token");
-        server.events = Some(EventsClient::with_test_token(&receiver.uri(), "synthetic-events-token"));
+        server.events = Some(Arc::new(EventsClient::with_test_token(&receiver.uri(), "synthetic-events-token")));
         let result = server.github_events(Parameters(EventsRequest::Read {
             listener_id: "listener-a".into(), limit: None, wait_seconds: None,
         })).await.unwrap();

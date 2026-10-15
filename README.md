@@ -7,6 +7,8 @@ tokens the raw API returns, and surfaces the fields agents actually act on
 
 Binary: `kp-github-mcp`.
 
+Several sessions on one machine can use the optional [shared local HTTP server](docs/shared-local-server.md), with separate MCP sessions and one pinned account/profile. The default transport remains stdio.
+
 ## Build
 
 ```sh

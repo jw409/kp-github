@@ -20,6 +20,8 @@ import tempfile
 
 REQUIRED_FILES = (
     "scripts/github_events_setup.py",
+    "scripts/setup_shared_http.py",
+    "docs/shared-local-server.md",
     "docs/developer-events-setup.md",
     "docs/listener-api.md",
     "docs/account-selection.md",
