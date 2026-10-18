@@ -1,10 +1,10 @@
-# Developer event consumers: proposed v1 protocol
+# Developer event consumers: v1 protocol
 
-**Status: client implemented and fake-service tested; receiver agreement, deployment,
-developer access policy, and end-to-end delivery remain pending.** This document proposes
-the contract for Meshly's existing receiver owner. It does not describe a deployed
-consumer service. The GitHub webhook ingress URL is not automatically a consumer
-API endpoint.
+**Status: client and receiver wire contract implemented.** Each operator supplies
+a deployed consumer endpoint, accepted audience, and developer access policy.
+Local tests and successful listener API calls do not establish real GitHub event
+delivery; verify the webhook-to-read-to-ack path separately. The GitHub webhook
+ingress URL is not automatically a consumer API endpoint.
 
 Meshly's instance can serve Meshlyai, Meshly-Open-Source, and subsequently onboarded
 organizations. An open source adopter supplies its own app and receiver. This

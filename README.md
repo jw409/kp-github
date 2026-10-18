@@ -46,8 +46,8 @@ their own GitHub and Google credentials; app signing keys stay with the receiver
 The optional `github_events` tool registers, lists, removes, reads, and explicitly
 acknowledges listeners for PR approvals, merges, and CI failures. Reads support a
 bounded wait and preserve event identifiers and payloads. Its
-[proposed receiver API](docs/listener-api.md) is tested against a local fake
-service; production use still requires the receiver owner to deploy that API
+[receiver API contract](docs/listener-api.md) is tested against a local fake
+service; use requires the receiver owner to deploy that API
 and publish its config. Meshly's instance serves its own onboarded organizations;
 other adopters deploy their own receiver and app.
 
@@ -67,3 +67,6 @@ For a standalone archive with the setup helper, documentation, sample config,
 and provenance, see [consumer packages](docs/consumer-package.md). The
 [GCS configuration contract](docs/gcs-config-contract.md) supplies samples and
 inputs for the receiver owner's Terraform implementation.
+
+See [CPU measurements and local-state design](docs/performance.md) for the Linux
+optimization baseline and when a local database would add useful capabilities.

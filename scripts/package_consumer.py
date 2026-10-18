@@ -39,6 +39,7 @@ REQUIRED_FILES = (
 OPTIONAL_FILES = (
     "LICENSE",
     "docs/gcs-config-contract.md",
+    "docs/performance.md",
     "examples/github-events/README.md",
     "examples/github-events/meshly.sample.json",
     "examples/github-events/meshly.sample.bundle",

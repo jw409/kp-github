@@ -2,8 +2,8 @@
   "schema_version": 2,
   "platforms": {
     "linux-x86_64": {
-      "source_commit": "cf2e01948c0b4a1671d5c56381ab62350d0cbf14",
-      "source_inputs_sha256": "c351b4cec94968c68b1ea1587eaa17a52ee653e7e093d4b5490c5872df67d8cf",
+      "source_commit": "aceb3a79b10f8db0be3203027b5f49b65b2bc811",
+      "source_inputs_sha256": "7387c000ccf5401ba04c9ce8d2a1996b93f3262ab367d31db8b66c385fb49e0c",
       "target": "x86_64-unknown-linux-gnu",
       "binary_sha256": "c7c2c041b295f19ea72c81989ab84ef5f708a0294ea4efe0fff94b409a84e044",
       "rust_version": "1.99.0"
