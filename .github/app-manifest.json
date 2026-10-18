@@ -1,0 +1,22 @@
+{
+  "name": "kp-github-events",
+  "url": "https://github.com/jw409/kp-github",
+  "description": "Read-only pull request, review, and CI events for developer listeners.",
+  "public": false,
+  "request_oauth_on_install": false,
+  "default_permissions": {
+    "metadata": "read",
+    "pull_requests": "read",
+    "checks": "read",
+    "actions": "read",
+    "statuses": "read"
+  },
+  "default_events": [
+    "pull_request",
+    "pull_request_review",
+    "check_run",
+    "check_suite",
+    "workflow_run",
+    "status"
+  ]
+}

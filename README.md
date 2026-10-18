@@ -7,6 +7,8 @@ tokens the raw API returns, and surfaces the fields agents actually act on
 
 Binary: `kp-github-mcp`.
 
+Stock installation uses one [shared local HTTP server](docs/shared-local-server.md) per user, with separate MCP sessions, request-scoped accounts and separate event profiles. The raw executable retains no-argument stdio compatibility for explicitly configured hosts.
+
 ## Build
 
 ```sh
@@ -17,19 +19,54 @@ cargo build --release   # -> target/release/kp-github-mcp
 ## Use
 
 ```sh
-claude mcp add kp-github --transport stdio -- /path/to/kp-github-mcp
+scripts/install.sh --github-account YOUR_GITHUB_LOGIN
+# Or: scripts/install.sh --accounts-config /absolute/path/accounts.json
 ```
 
-Auth follows the ambient GitHub credentials; commit author defaults come from
-`GIT_AUTHOR_*`.
+The installer starts a systemd user service on Linux or a launchd agent on macOS
+and registers Claude Code over local HTTP. Use `--no-register` for another MCP
+host. It requires an explicit account or account registry and never changes CLI
+account defaults. Existing stdio sessions continue until you reconnect.
+
+For a manually launched executable, select a stored account for this process with `KP_GITHUB_ACCOUNT=jw408`, or use
+`GH_TOKEN`, then `GITHUB_TOKEN`, then the existing `gh` default. Event profiles
+never choose credentials for ordinary GitHub tools. For multiple accounts and
+organizations in one process, explicitly enable `KP_GITHUB_ACCOUNTS_CONFIG` and
+select `github_account` on each tool call. See [account selection](docs/account-selection.md).
+
+## GitHub event app
+
+The optional [app registration helper](docs/github-app.md) creates a minimal,
+read-only GitHub App for PR approvals, merges, and CI events. It uses explicit
+per-process GitHub credentials and keeps app keys private to the operator.
+Developers can use the [cached setup helper](docs/developer-events-setup.md) to
+load one shared config bundle through GCS or copy/paste. Each developer keeps
+their own GitHub and Google credentials; app signing keys stay with the receiver.
+
+The optional `github_events` tool registers, lists, removes, reads, and explicitly
+acknowledges listeners for PR approvals, merges, and CI failures. Reads support a
+bounded wait and preserve event identifiers and payloads. Its
+[receiver API contract](docs/listener-api.md) is tested against a local fake
+service; use requires the receiver owner to deploy that API
+and publish its config. Meshly's instance serves its own onboarded organizations;
+other adopters deploy their own receiver and app.
 
 ## Relationship to kinderpowers
 
-Extracted from [jw409/kinderpowers](https://github.com/jw409/kinderpowers),
-which consumes this repo as a submodule at `mcp-servers/github` and ships a
-pre-built binary at `mcp-servers/bin/kp-github-mcp`. The plugin's `plugin.json`
-points at that binary, so **installing the plugin does not require this repo** —
-it's a build-time dependency only.
+The [kinderpowers marketplace](https://github.com/jw409/kinderpowers) offers this
+repository directly as the `kp-github` plugin. Its `bin/kp-github-mcp` wrapper
+runs the checked-in Linux x86_64 binary. Published binaries and consumer archives
+currently target Linux x86_64 only.
 
-Source changes land here; kinderpowers then bumps its submodule pointer and
-rebuilds binaries via its `mcp-v*` tag workflow.
+The combined `kinderpowers` plugin mounts this repository at
+`mcp-servers/github`; its wrapper runs the binaries inside that pinned submodule.
+The submodule is required at runtime. Updating the consumer therefore means
+publishing matching binaries here and advancing its submodule pin.
+
+For a standalone archive with the setup helper, documentation, sample config,
+and provenance, see [consumer packages](docs/consumer-package.md). The
+[GCS configuration contract](docs/gcs-config-contract.md) supplies samples and
+inputs for the receiver owner's Terraform implementation.
+
+See [CPU measurements and local-state design](docs/performance.md) for the Linux
+optimization baseline and when a local database would add useful capabilities.

@@ -14,9 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -28,5 +32,35 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - run: cargo test
-      - run: cargo build --release
+      - run: cargo test --locked
+      - name: Test GitHub App registration and developer setup
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - run: cargo build --locked --release
+      - name: Smoke shared local server and existing stdio transport
+        run: |
+          python3 tests/smoke_shared_http.py --binary target/release/kp-github-mcp -v
+          python3 tests/smoke_consumer.py --binary target/release/kp-github-mcp
+
+  checked-binary-source:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+      - name: Check payload and reproduce native declared source
+        run: |
+          python3 scripts/binary_provenance.py verify
+          python3 scripts/binary_provenance.py verify --platform ${{ matrix.platform }} --require-current
+          python3 scripts/binary_provenance.py reproduce --platform ${{ matrix.platform }}

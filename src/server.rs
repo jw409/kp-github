@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::compress::{compress, CompressConfig, OutputFormat};
 use crate::format::format_output;
+use crate::events::{EventsClient, EventsRequest};
 use crate::github::client::GithubClient;
 use crate::tools;
 
@@ -30,17 +31,24 @@ use crate::tools;
 /// legitimately slow single request still completes.
 const GLOBAL_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
 
+#[derive(Clone)]
 pub struct KpGithubServer {
     client: Arc<GithubClient>,
+    events: Option<Arc<EventsClient>>,
+    events_error: Option<String>,
+    accounts: Option<Arc<crate::accounts::Accounts>>,
     tool_router: ToolRouter<Self>,
     /// Opt-in usage sink (`KP_GITHUB_USAGE_LOG`). `None` = disabled, zero overhead.
     usage_log: Option<Arc<std::sync::Mutex<std::fs::File>>>,
 }
 
 impl KpGithubServer {
-    fn new(token: &str) -> Self {
+    pub(crate) fn new(token: &str) -> Self {
         Self {
             client: Arc::new(GithubClient::new(token)),
+            events: None,
+            events_error: None,
+            accounts: None,
             tool_router: Self::tool_router(),
             usage_log: Self::open_usage_log(),
         }
@@ -50,9 +58,38 @@ impl KpGithubServer {
     fn with_client(client: GithubClient) -> Self {
         Self {
             client: Arc::new(client),
+            events: None,
+            events_error: None,
+            accounts: None,
             tool_router: Self::tool_router(),
             usage_log: None,
         }
+    }
+
+    fn account_schema(&self, mut tool: rmcp::model::Tool) -> rmcp::model::Tool {
+        let schema = Arc::make_mut(&mut tool.input_schema);
+        let mut selector = serde_json::json!({"type":"string", "description":
+            "GitHub login explicitly enabled for this server. Selects only this request; never changes gh's active account. Required in multi-account mode without a default."});
+        if let Some(accounts) = &self.accounts {
+            let names = accounts.names();
+            if !names.is_empty() { selector["enum"] = serde_json::json!(names); }
+        }
+        schema.entry("properties".to_string()).or_insert_with(|| serde_json::json!({}))
+            .as_object_mut().unwrap().insert("github_account".into(), selector.clone());
+        // Events uses a closed, tagged union: the selector must be admitted by
+        // each branch too, or validating clients reject an otherwise valid call.
+        if let Some(Value::Array(variants)) = schema.get_mut("oneOf") {
+            for variant in variants {
+                if let Some(properties) = variant.get_mut("properties").and_then(Value::as_object_mut) {
+                    properties.insert("github_account".into(), selector.clone());
+                }
+            }
+        }
+        if self.accounts.as_ref().is_some_and(|accounts| accounts.requires_selector()) {
+            schema.entry("required".to_string()).or_insert_with(|| serde_json::json!([]))
+                .as_array_mut().unwrap().push(serde_json::json!("github_account"));
+        }
+        tool
     }
 
     /// Open the opt-in usage log named by `KP_GITHUB_USAGE_LOG` (append mode).
@@ -982,6 +1019,26 @@ pub struct ReleaseCreateParams {
 
 #[rmcp::tool_router]
 impl KpGithubServer {
+    /// Register, list, remove, read, or acknowledge a private developer event
+    /// listener. Read supports a bounded wait. Acknowledgement is explicit;
+    /// event payloads and opaque acknowledgement tokens are returned intact.
+    /// Requires a configured receiver implementing the proposed v1 API.
+    #[rmcp::tool(name = "github_events")]
+    async fn github_events(&self, Parameters(request): Parameters<EventsRequest>) -> Result<CallToolResult, McpError> {
+        if let Some(error) = &self.events_error {
+            return Err(McpError::invalid_request(error.clone(), None));
+        }
+        let client = self.events.as_ref().ok_or_else(|| McpError::invalid_request(
+            "Developer events are not configured. Run scripts/github_events_setup.py setup with your receiver's config bundle, then set KP_GITHUB_EVENTS_CONFIG to the saved profile.",
+            None,
+        ))?;
+        let result = client.execute(request).await
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        // These records are replay/ack protocol data. Generic GitHub response
+        // compression must not drop fields or abbreviate their identifiers.
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
     // ==================== Issues ====================
 
     /// List issues in a GitHub repository with token-compressed output
@@ -1676,8 +1733,32 @@ impl ServerHandler for KpGithubServer {
             (keys, has("fields"), has("format"), limit)
         });
 
-        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let (res, outcome) = match tokio::time::timeout(GLOBAL_TOOL_TIMEOUT, self.tool_router.call(tcc)).await {
+        let dispatch = async {
+            let mut request = request;
+            let selected = request.arguments.as_mut().and_then(|args| args.remove("github_account"));
+            let selected = match selected.as_ref() {
+                None => None,
+                Some(Value::String(name)) => Some(name.as_str()),
+                _ => return Err(McpError::invalid_params("github_account must be a login string", None)),
+            };
+            // A request-local clone shares pools/caches, but never an active-account
+            // variable. Concurrent requests and sessions cannot change each other.
+            let mut scoped = self.clone();
+            if let Some(accounts) = &self.accounts {
+                if tool_name == "github_events" {
+                    let events = accounts.events(selected).map_err(|e| McpError::invalid_params(e, None))?;
+                    scoped.events = events.client;
+                    scoped.events_error = events.error;
+                } else {
+                    scoped.client = accounts.client(selected).await.map_err(|e| McpError::invalid_params(e, None))?;
+                }
+            } else if selected.is_some() {
+                return Err(McpError::invalid_params("account selection is unavailable", None));
+            }
+            let tcc = rmcp::handler::server::tool::ToolCallContext::new(&scoped, request, context);
+            scoped.tool_router.call(tcc).await
+        };
+        let (res, outcome) = match tokio::time::timeout(GLOBAL_TOOL_TIMEOUT, dispatch).await {
             Ok(Ok(ct)) => (Ok(ct), "ok"),
             Ok(Err(e)) => (Err(e), "error"),
             Err(_) => (
@@ -1709,14 +1790,14 @@ impl ServerHandler for KpGithubServer {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, McpError> {
         Ok(rmcp::model::ListToolsResult {
-            tools: self.tool_router.list_all(),
+            tools: self.tool_router.list_all().into_iter().map(|tool| self.account_schema(tool)).collect(),
             meta: None,
             next_cursor: None,
         })
     }
 
     fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
-        self.tool_router.get(name).cloned()
+        self.tool_router.get(name).cloned().map(|tool| self.account_schema(tool))
     }
 
     fn get_info(&self) -> ServerInfo {
@@ -1725,7 +1806,7 @@ impl ServerHandler for KpGithubServer {
                 name: "kp-github-mcp".into(),
                 title: Some("Token-Compressed GitHub MCP Server".into()),
                 version: env!("CARGO_PKG_VERSION").into(),
-                description: Some("66-tool GitHub MCP server with 10-40x token compression via field projection, smart formatting, and 5-stage compression pipeline. Reqwest HTTP primary, gh CLI fallback.".into()),
+                description: Some("GitHub MCP server with compressed API tools and an optional private developer event listener. Reqwest HTTP primary, gh CLI fallback.".into()),
                 icons: None,
                 website_url: None,
             },
@@ -1747,7 +1828,7 @@ impl ServerHandler for KpGithubServer {
         use rmcp::model::RawResourceTemplate;
         use rmcp::model::Annotated;
 
-        let templates = vec![
+        let mut templates = vec![
             Annotated::new(
                 RawResourceTemplate {
                     uri_template: "github://repos/{owner}/{repo}/issues".into(),
@@ -1794,6 +1875,12 @@ impl ServerHandler for KpGithubServer {
             ),
         ];
 
+        let named: Vec<_> = templates.iter().cloned().map(|mut template| {
+            template.raw.uri_template = template.raw.uri_template.replace("github://repos/", "github://accounts/{github_account}/repos/");
+            template.raw.name = format!("account_{}", template.raw.name);
+            template
+        }).collect();
+        templates.extend(named);
         std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(templates)))
     }
 
@@ -1805,10 +1892,19 @@ impl ServerHandler for KpGithubServer {
         async move {
             let uri = &request.uri;
 
-            // Parse github://repos/{owner}/{repo}[/suffix]
-            let path = uri
-                .strip_prefix("github://repos/")
-                .ok_or_else(|| McpError::invalid_params(format!("unsupported URI scheme: {uri}"), None))?;
+            // Named resources: github://accounts/{account}/repos/{owner}/{repo}.
+            // Legacy resource URIs use only the explicitly configured default.
+            let (selected, path) = if let Some(rest) = uri.strip_prefix("github://accounts/") {
+                let (account, rest) = rest.split_once("/repos/").ok_or_else(|| McpError::invalid_params("invalid account resource URI", None))?;
+                (Some(account), rest)
+            } else {
+                (None, uri.strip_prefix("github://repos/").ok_or_else(|| McpError::invalid_params("unsupported resource URI", None))?)
+            };
+            let client = match &self.accounts {
+                Some(accounts) => accounts.client(selected).await.map_err(|e| McpError::invalid_params(e, None))?,
+                None if selected.is_none() => self.client.clone(),
+                None => return Err(McpError::invalid_params("account selection is unavailable", None)),
+            };
 
             let parts: Vec<&str> = path.splitn(3, '/').collect();
             if parts.len() < 2 {
@@ -1824,21 +1920,21 @@ impl ServerHandler for KpGithubServer {
 
             let (text, mime) = match suffix {
                 "issues" => {
-                    let result = tools::issues::list(&self.client, owner, repo, Some("open"), Some(30))
+                    let result = tools::issues::list(&client, owner, repo, Some("open"), Some(30))
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                     let output = self.compress_and_format(result, None, None);
                     (output, "text/plain")
                 }
                 "pulls" => {
-                    let result = tools::prs::list(&self.client, owner, repo, Some("open"), Some(30))
+                    let result = tools::prs::list(&client, owner, repo, Some("open"), Some(30))
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                     let output = self.compress_and_format(result, None, None);
                     (output, "text/plain")
                 }
                 "readme" => {
-                    let result = tools::files::get_contents(&self.client, owner, repo, "README.md", None)
+                    let result = tools::files::get_contents(&client, owner, repo, "README.md", None)
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                     // The GitHub contents API returns base64-encoded content;
@@ -1862,7 +1958,7 @@ impl ServerHandler for KpGithubServer {
                     (text, "text/markdown")
                 }
                 "" => {
-                    let result = tools::repos::get(&self.client, owner, repo)
+                    let result = tools::repos::get(&client, owner, repo)
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                     let output = self.compress_and_format(result, None, None);
@@ -1888,8 +1984,13 @@ impl ServerHandler for KpGithubServer {
     }
 }
 
-pub async fn run(token: String) -> anyhow::Result<()> {
-    let server = KpGithubServer::new(&token);
+pub(crate) fn configured(accounts: crate::accounts::Accounts) -> KpGithubServer {
+    let mut server = KpGithubServer::new("unselected-request-must-resolve-account");
+    server.accounts = Some(Arc::new(accounts));
+    server
+}
+
+pub async fn run(server: KpGithubServer) -> anyhow::Result<()> {
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -1901,6 +2002,66 @@ mod tests {
     use serde_json::json;
 
     // ---- Server construction ----
+
+    #[tokio::test]
+    async fn test_events_without_config_is_explicit_and_keeps_github_tools() {
+        let server = KpGithubServer::new("synthetic-test-token");
+        let error = server.github_events(Parameters(EventsRequest::List)).await.unwrap_err();
+        assert!(error.message.contains("Developer events are not configured"));
+        assert!(server.tool_router.get("github_prs_get").is_some());
+        assert!(server.tool_router.get("github_events").is_some());
+        let tools = server.tool_router.list_all();
+        let events = tools.iter().find(|tool| tool.name == "github_events").unwrap();
+        assert_eq!(events.input_schema.get("type"), Some(&json!("object")));
+    }
+
+    #[tokio::test]
+    async fn test_events_tool_preserves_delivery_records_and_ack_is_explicit() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{body_json, header, method, path, query_param};
+
+        let receiver = MockServer::start().await;
+        let ack = "opaque-token-for-listener-a/do-not-shorten-or-parse==";
+        let record = json!({
+            "events": [{
+                "delivery_id": "5df19aa9-c9b4-45c6-9f66-3b7d2c5b8e81",
+                "ack_token": ack,
+                "head_sha": "0123456789abcdef0123456789abcdef01234567",
+                "kind": "ci_failed",
+                "raw_conclusion": "failure",
+                "current_head": null,
+                "workflow_attempt": 2,
+                "received_at": "2026-10-15T09:00:00.123Z"
+            }],
+            "next_cursor": "opaque-cursor=="
+        });
+        Mock::given(method("GET"))
+            .and(path("/v1/listeners/listener-a/events"))
+            .and(query_param("limit", "30"))
+            .and(query_param("wait_seconds", "0"))
+            .and(header("authorization", "Bearer synthetic-events-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&record))
+            .expect(1).mount(&receiver).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/listeners/listener-a/ack"))
+            .and(body_json(json!({"ack_tokens": [ack]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": 1})))
+            .expect(1).mount(&receiver).await;
+
+        let mut server = KpGithubServer::new("synthetic-github-token");
+        server.events = Some(Arc::new(EventsClient::with_test_token(&receiver.uri(), "synthetic-events-token")));
+        let result = server.github_events(Parameters(EventsRequest::Read {
+            listener_id: "listener-a".into(), limit: None, wait_seconds: None,
+        })).await.unwrap();
+        let returned: Value = serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(returned, record);
+        assert_eq!(receiver.received_requests().await.unwrap().len(), 1);
+
+        server.github_events(Parameters(EventsRequest::Ack {
+            listener_id: "listener-a".into(), ack_tokens: vec![ack.into()],
+        })).await.unwrap();
+        assert_eq!(receiver.received_requests().await.unwrap().len(), 2);
+    }
 
     #[test]
     fn test_server_new() {
