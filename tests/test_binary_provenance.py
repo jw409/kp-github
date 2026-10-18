@@ -45,7 +45,7 @@ class Tampering(unittest.TestCase):
     def write(self):
         (self.root / 'bin/consumer-provenance.json').write_text(json.dumps(self.manifest))
 
-    def test_both_platform_bytes_are_checked(self):
+    def test_supported_platform_bytes_are_checked(self):
         for platform in proof.TARGETS:
             binary = self.root / 'bin' / platform / 'kp-github-mcp'
             original = binary.read_bytes()

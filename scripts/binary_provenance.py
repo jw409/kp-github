@@ -17,7 +17,7 @@ import subprocess
 import tarfile
 import tempfile
 
-TARGETS = {"linux-x86_64": "x86_64-unknown-linux-gnu", "macos-arm64": "aarch64-apple-darwin"}
+TARGETS = {"linux-x86_64": "x86_64-unknown-linux-gnu"}
 INPUTS = ("src", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", ".cargo", "scripts/binary_provenance.py")
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,7 +72,7 @@ def validate_receipt(root, binary, receipt, target, require_current=False):
 def verify(root=ROOT, platform=None, require_current=False):
     manifest = json.loads(regular(root / "bin/consumer-provenance.json"))
     if not isinstance(manifest, dict) or manifest.get("schema_version") != 2 or not isinstance(manifest.get("platforms"), dict) or set(manifest["platforms"]) != set(TARGETS):
-        raise ProvenanceError("Expected schema 2 provenance for both supported platforms.")
+        raise ProvenanceError("Expected schema 2 provenance for the supported platforms.")
     for name in [platform] if platform else TARGETS:
         validate_receipt(root, root / "bin" / name / "kp-github-mcp", manifest["platforms"][name], TARGETS[name], require_current)
     return manifest

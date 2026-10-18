@@ -55,7 +55,8 @@ other adopters deploy their own receiver and app.
 
 The [kinderpowers marketplace](https://github.com/jw409/kinderpowers) offers this
 repository directly as the `kp-github` plugin. Its `bin/kp-github-mcp` wrapper
-selects the checked-in Linux x86_64 or macOS arm64 binary.
+runs the checked-in Linux x86_64 binary. Published binaries and consumer archives
+currently target Linux x86_64 only.
 
 The combined `kinderpowers` plugin mounts this repository at
 `mcp-servers/github`; its wrapper runs the binaries inside that pinned submodule.

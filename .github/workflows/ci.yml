@@ -48,8 +48,6 @@ jobs:
         include:
           - os: ubuntu-24.04
             platform: linux-x86_64
-          - os: macos-latest
-            platform: macos-arm64
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -61,7 +59,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
-      - name: Check both payloads and reproduce native declared source
+      - name: Check payload and reproduce native declared source
         run: |
           python3 scripts/binary_provenance.py verify
           python3 scripts/binary_provenance.py verify --platform ${{ matrix.platform }} --require-current

@@ -4,7 +4,7 @@ The consumer archive contains a built `bin/kp-github-mcp`, the Python 3 standard
 
 ## Download and use
 
-Download the artifact matching your system from the **Consumer Packages** workflow: `consumer-linux-x86_64` for Linux x86-64 or `consumer-macos-arm64` for Apple Silicon macOS. Extract the GitHub artifact wrapper to obtain its `.tar.gz` and `.tar.gz.sha256` files. The package's `MANIFEST.json` records `source_commit`, `source_modified`, target, and payload hashes. Pull-request packages are built from the exact candidate head commit, rather than GitHub's generated merge commit.
+Download `consumer-linux-x86_64` from the **Consumer Packages** workflow. This release targets Linux x86-64 only. Extract the GitHub artifact wrapper to obtain its `.tar.gz` and `.tar.gz.sha256` files. The package's `MANIFEST.json` records `source_commit`, `source_modified`, target, and payload hashes. Pull-request packages are built from the exact candidate head commit, rather than GitHub's generated merge commit.
 
 Verify and extract the archive from that directory, substituting your target:
 
@@ -16,7 +16,7 @@ sha256sum -c SHA256SUMS
 python3 scripts/github_events_setup.py --help
 ```
 
-On macOS, use `shasum -a 256 -c` in place of `sha256sum -c`. The checksum files detect corruption; trust depends on the workflow/source you downloaded them from. Linux packages built on `ubuntu-latest` require a compatible glibc runtime; they are not static or universal Linux binaries. Select the matching architecture.
+The checksum files detect corruption; trust depends on the workflow/source you downloaded them from. Linux packages built on `ubuntu-latest` require a compatible glibc runtime; they are not static or universal Linux binaries.
 
 Use the operator's bundle or known GCS object with the setup helper, following [developer setup](developer-events-setup.md). Then run `scripts/install.sh --github-account YOUR_GITHUB_LOGIN --events-config /absolute/path/events.json`, or `scripts/install.sh --accounts-config /absolute/path/accounts.json`. The stock installer starts a shared local HTTP user service and registers Claude Code; use `--no-register` for another host. Extraction alone changes no installed configuration. `gh` and, for events, `gcloud` are external prerequisites using your own logins.
 
@@ -68,25 +68,18 @@ python3 scripts/binary_provenance.py verify --require-current
 python3 scripts/binary_provenance.py reproduce --platform linux-x86_64
 ```
 
-The first check validates both tracked payloads against their declared source
+The first check validates the tracked payload against its declared source
 receipts and is part of ordinary Python test discovery. The second additionally
-rejects stale binaries after a source change and runs for each platform in CI.
+rejects a stale binary after a source change and runs in CI.
 The third builds the declared
-revision from scratch and requires identical bytes; use `macos-arm64` on a
-native macOS runner. Full Git history and the receipt's exact Rust toolchain are
+revision from scratch and requires identical bytes. Full Git history and the receipt's exact Rust toolchain are
 required. Cargo registry paths are normalized to the native Actions paths so
 panic locations and C source filenames do not depend on the developer's home.
 Compiler/SDK changes can still fail reproduction; such failures block the gate
 and require investigation, never automatic acceptance of new hashes.
 
-The Linux payload has been rebuilt from the corrected account-scoping source.
-The macOS payload still declares its historical source and lacks those changes;
-its native replacement build and verification are pending. Do not publish a
-combined release until both platforms pass `verify --require-current`. Build
-a fresh consumer package to test source changes on either native platform.
-The macOS provenance CI job will fail closed until its payload is refreshed.
-An explicit feature-branch **Build Binaries** dispatch produces both native
-artifacts and receipts without committing to main. Download those artifacts,
-run `assemble --artifacts DIRECTORY`, and commit the verified pair for review.
-The publication job assembles both artifacts and validates their receipts against
+An explicit feature-branch **Build Binaries** dispatch produces the Linux native
+artifact and receipt without committing to main. Download that artifact,
+run `assemble --artifacts DIRECTORY`, and commit the verified payload for review.
+The publication job assembles the artifact and validates its receipt against
 the publication checkout before committing them; it does not skip CI.

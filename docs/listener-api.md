@@ -166,18 +166,40 @@ state change occurred.
 
 | Method and route | Request | Required receiver behavior |
 | --- | --- | --- |
-| `POST /v1/listeners` | `{ "owner": "Meshlyai", "repo": "example", "events": ["approved", "merged", "ci_failed"], "idempotency_key": "stable-request-id" }` | Create a listener for the authenticated consumer. Omitted `repo` requests organization scope and requires org-wide authorization. Scope idempotency to consumer and key. Same key/body returns the same result; same key/different body returns 409. |
+| `POST /v1/listeners` | `{ "owner": "ExampleOrg", "repo": "example", "events": ["approved", "merged", "ci_failed"], "idempotency_key": "stable-request-id" }` | Create a listener for the authenticated consumer and account namespace. Omitted `repo` requests organization scope and requires org-wide authorization. Scope idempotency to verified Google principal, case-folded account namespace, and key. Same key/body returns the same result; same key/different body returns 409. |
 | `GET /v1/listeners` | No body | List only the authenticated consumer's listeners. |
-| `DELETE /v1/listeners/{id}` | No body | Remove only a listener owned by the consumer. Repeated removal is safe; documented 204 or 404 response. |
+| `DELETE /v1/listeners/{id}` | No body | Ensure the listener is absent in the caller's account namespace. A missing or another namespace's ID may return 204 without changing another consumer's listener. Repeated removal is safe; documented 204 or 404 response. |
 | `GET /v1/listeners/{id}/events?limit=30&wait_seconds=0` | No body | Return at most 100 delivery records; wait at most 30 seconds. Reading does not acknowledge. Preserve each consumer's independent delivery state. |
 | `POST /v1/listeners/{id}/ack` | `{ "ack_tokens": ["opaque-receiver-issued-token"] }` | Acknowledge only the specified deliveries for this listener and consumer. Validate the complete batch before advancing delivery state. Reject cross-listener, cross-consumer, forged, or expired tokens. Repeating a successful ack is safe. |
 
-The proposed success envelope for registration is `{ "listener": { "id": "...",
+The success envelope for registration is `{ "listener": { "id": "...",
 "owner": "...", "repo": null, "events": [...] } }`; listing is
-`{ "listeners": [...] }`; reading is `{ "events": [...], "more_available": false }`;
-ack is `{ "acked": 1 }`. The client currently preserves JSON without enforcing
-those response schemas, allowing the receiver owner to finalize envelopes before
-deployment. A 204 response becomes JSON `null`.
+`{ "listeners": [...] }`; ack is `{ "acked": 1 }`. Reads retain the full envelope:
+
+```json
+{
+  "events": [],
+  "more_available": false,
+  "retention_seconds": 604800,
+  "retention_cutoff": 1791633600,
+  "expired_deliveries": 0,
+  "retention_gap": false
+}
+```
+
+The cutoff above is illustrative Unix time; use the values returned by the
+receiver. `expired_deliveries` counts expired or missing deliveries encountered
+during that read; `retention_gap` reports a missing stream interval. Preserve
+both even for an empty batch. Neither an empty batch nor `more_available: false`
+proves that no delivery was lost to retention.
+
+The client preserves successful JSON verbatim, including unknown fields and
+nulls, without imposing a closed response schema. A 204 response becomes JSON
+`null`: it establishes absence in the caller's namespace, not that another
+namespace's listener existed or was removed. Registering with a deleted or
+expired listener's idempotency key can return 410; create a new key when starting
+a new subscription. An existing listener does not replay events from before its
+registration.
 
 Listener IDs contain 1–128 ASCII letters, digits, underscores, or hyphens. The
 registration idempotency key contains 1–128 ASCII letters/digits or `._:-`.
@@ -194,7 +216,10 @@ GitHub delivery identifier, event/action, installation/org/repo identifiers, PR
 number, event head SHA, current head SHA when known, receipt time, original
 conclusion/state, raw payload, and an opaque ack token bound to consumer,
 listener, and delivery/lease. Any unknown field remains unknown or `null`. A retry
-or redelivery attempt must not replace the underlying event's identity.
+or redelivery attempt must not replace the underlying event's identity. The
+delivery fields include `delivery_id`, `kind`, `head_sha`, `raw_state`,
+`raw_conclusion`, and `ack_token`; preserve null values when the source supplies
+no fact. A raw-payload reference is not evidence that the payload was fetched.
 
 `approved` means an observed approving review event, not proof that all branch
 protection requirements are met. Dismissed reviews, outdated heads, later commits,
@@ -211,8 +236,12 @@ tokens. Every consumer has its own delivery position; acknowledging in one
 consumer must not consume events for another. Delivery is at least once: consumers
 must handle duplicates after crashes, expired leases, and uncertain ack responses.
 The client does not auto-ack, silently advance a cursor, or deduplicate away raw
-events. Retention periods, replay windows, lease duration, pagination of listener
-lists, and recovery after retention expiry are receiver decisions still pending.
+events. An unacknowledged delivery may appear again on an immediate read. Its ack
+token can change when its lease expires; do not use the token as the event's
+deduplication key. Successful repeated acknowledgement remains safe while the
+token and retained event are valid. Retention and lease durations belong to the
+receiver; consumers must inspect retention metadata and handle expired tokens
+without silently declaring the queue complete.
 
 ## Local validation and remaining dependency
 

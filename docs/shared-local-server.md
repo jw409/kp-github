@@ -81,8 +81,8 @@ Linux status/restart: `systemctl --user status kp-github.service` /
 `systemctl --user restart kp-github.service`. macOS status/restart:
 `launchctl print gui/$(id -u)/ai.kp-github` /
 `launchctl kickstart -k gui/$(id -u)/ai.kp-github`.
-The launchd unit is covered by configuration tests; native macOS service execution
-and a rebuilt macOS binary remain pending on this Linux development machine.
+Published packages support Linux x86_64 only. The retained launchd helper is
+covered by configuration tests; native macOS service execution is unverified.
 
 For manual supervision, the preparation-only helper remains available:
 

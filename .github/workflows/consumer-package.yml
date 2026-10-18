@@ -13,12 +13,16 @@ on:
       - 'scripts/package_consumer.py'
       - 'scripts/github_events_setup.py'
       - 'scripts/setup_shared_http.py'
+      - 'scripts/install.sh'
+      - 'scripts/install_local_http.py'
       - 'docs/**'
       - 'examples/github-events/**'
       - 'tests/test_consumer_package.py'
       - 'tests/smoke_consumer.py'
       - 'tests/smoke_shared_http.py'
       - 'tests/test_shared_http_setup.py'
+      - 'tests/test_local_http_install.py'
+      - 'tests/smoke_local_install.py'
       - '.github/workflows/consumer-package.yml'
   push:
     tags: ['v*']
@@ -39,9 +43,6 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            platform: macos-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
