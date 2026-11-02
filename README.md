@@ -1,5 +1,12 @@
 # kp-github
 
+> **Deprecated.** kp-github is frozen at this release. Its successor is
+> **`codeseek-github`**, the discrete GitHub MCP service built from the
+> `ck-github` crate in [Meshly-Open-Source/codeseek](https://github.com/Meshly-Open-Source/codeseek).
+> Existing installs keep working; new work, fixes and the codeseek / beads /
+> Linear integrations land there. `KP_GITHUB_*` environment variables are
+> accepted by the successor as deprecated aliases.
+
 Token-compressed GitHub MCP server for Claude Code. Wraps the GitHub API with
 aggressive response compression so PR/issue/CI reads cost a fraction of the
 tokens the raw API returns, and surfaces the fields agents actually act on
