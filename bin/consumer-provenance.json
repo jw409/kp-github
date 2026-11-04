@@ -2,10 +2,10 @@
   "schema_version": 2,
   "platforms": {
     "linux-x86_64": {
-      "source_commit": "aceb3a79b10f8db0be3203027b5f49b65b2bc811",
-      "source_inputs_sha256": "7387c000ccf5401ba04c9ce8d2a1996b93f3262ab367d31db8b66c385fb49e0c",
+      "source_commit": "ee7173da39e2558dcb576a9f501ffb0d0afb1e0d",
+      "source_inputs_sha256": "78784d1150adadf730d224604096f5568a4987fb3fe95396b44ce4ab495ddf37",
       "target": "x86_64-unknown-linux-gnu",
-      "binary_sha256": "c7c2c041b295f19ea72c81989ab84ef5f708a0294ea4efe0fff94b409a84e044",
+      "binary_sha256": "234b88e75a8c5bfa38f520e7e470dec43e467f13b1555219e70e20f478a20a39",
       "rust_version": "1.99.0"
     }
   }
