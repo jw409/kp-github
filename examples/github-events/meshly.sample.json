@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "endpoint": "https://meshly-events.sample.invalid",
+  "audience": "receiver-approved-google-oauth-client-id",
+  "allowed_orgs": ["Meshlyai", "Meshly-Open-Source"],
+  "app_slug": "meshly-open-source-dev-events"
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:kp-github:shared-events-config:v1",
+  "title": "kp-github shared developer-events configuration v1",
+  "description": "Nonsecret operator configuration before kpghcfg1_ packing. This schema checks structure; the pack command additionally validates URL ports, UTF-8 byte limits and case-insensitive organization uniqueness. Sample validity does not mean the receiver is deployed or the configuration is production-ready.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "endpoint", "audience", "allowed_orgs"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "endpoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "format": "uri",
+      "pattern": "^https://[^/?#@\\\\\\s\\u0000-\\u001f\\u007f-\\u009f]+(?:/[^?#\\\\\\s\\u0000-\\u001f\\u007f-\\u009f]*)?$",
+      "not": {"pattern": "^https://[^/]*:0+(?:/|$)"},
+      "description": "Consumer API base URL, distinct from GitHub webhook ingress. HTTPS only; no user information, query, fragment, backslash, whitespace or control characters. At most 2048 UTF-8 bytes; port must be 1 through 65535 if specified. The authoritative pack validator performs the byte-length and URL-port checks."
+    },
+    "audience": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f]+$",
+      "description": "Receiver-approved Google ID-token audience, at most 2048 UTF-8 bytes. Must match receiver verification policy; a human gcloud account cannot mint an arbitrary custom audience. No whitespace or control characters."
+    },
+    "allowed_orgs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 39,
+        "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$",
+        "not": {"pattern": "--"}
+      },
+      "description": "Allowed GitHub organizations. The pack command additionally enforces case-insensitive uniqueness. This local list is not a server authorization grant."
+    },
+    "app_slug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*$",
+      "description": "Optional GitHub App slug; public metadata only."
+    }
+  }
+}

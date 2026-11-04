@@ -1,9 +1,14 @@
+#[cfg(test)]
+mod account_tests;
+mod accounts;
 mod auth;
 mod compress;
+mod events;
 mod format;
 mod github;
 mod query;
 mod server;
+mod shared_http;
 mod tools;
 pub mod util;
 
@@ -11,6 +16,14 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let mode = shared_http::Mode::parse(std::env::args().skip(1))?;
+    if matches!(mode, shared_http::Mode::Help) {
+        println!("{}", shared_http::HELP);
+        return Ok(());
+    }
+    // Read/validate the local HTTP key before looking up any GitHub credential.
+    let http = mode.prepare()?;
+
     // Initialize tracing to stderr (MCP uses stdout for JSON-RPC)
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -22,10 +35,11 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("kp-github-mcp starting");
 
-    // Resolve auth
-    let token = auth::resolve_token()?;
-    tracing::info!("GitHub auth resolved");
-
-    // Start MCP server on stdio
-    server::run(token).await
+    // Accounts and events have separate authority. Profile errors disable only
+    // that account's event tool; profiles never select GitHub credentials.
+    let server = server::configured(accounts::Accounts::from_environment()?);
+    match http {
+        Some(config) => shared_http::run(server, config).await,
+        None => server::run(server).await,
+    }
 }

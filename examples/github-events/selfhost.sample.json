@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "endpoint": "https://selfhost-events.sample.invalid",
+  "audience": "receiver-approved-google-oauth-client-id",
+  "allowed_orgs": ["Your-GitHub-Org"],
+  "app_slug": "your-github-events-app"
+}
